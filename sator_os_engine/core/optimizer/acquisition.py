@@ -195,6 +195,7 @@ def select_candidates_single_objective(
             x_in = _enforce_ratio_constraints_np(x_in, params, req)
             x_in = _enforce_sum_constraints_np(x_in, params, req)
             z_norm = (pca.transform(x_in) - np.asarray(pc_mins)) / np.asarray(pc_range)
+            z_norm = np.clip(z_norm, 0.0, 1.0)
             return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         x_in = _enforce_sum_constraints_np(cand_np, params, req)
         x_in = _enforce_ratio_constraints_np(x_in, params, req)
@@ -211,8 +212,16 @@ def select_candidates_single_objective(
     # than dismissing every sample because of a sum mismatch.
     grid_input_np = _enforce_sum_constraints_np(grid.detach().cpu().numpy(), params, req)
     grid = torch.tensor(grid_input_np, dtype=tdtype, device=tdevice)
+    in_envelope = None
     if use_pca_model and pca is not None:
         z_norm = _input_space_to_z_norm(grid_input_np, pca, pc_mins, pc_range)
+        # The GP was fit on z_norm in [0,1]^k (the training PC envelope).
+        # Samples that project outside that envelope are extrapolations and
+        # would be plotted outside the rendered GP surface. Track which
+        # samples stay inside so we can prefer them in the feasibility mask
+        # below; this mirrors bounds_model_pca=[0,1]^k used by the BoTorch
+        # path, which keeps its optimiser strictly in-envelope by construction.
+        in_envelope = np.all((z_norm >= 0.0) & (z_norm <= 1.0), axis=1)
         Zgrid = torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         post = model.models[0].posterior(Zgrid)
     else:
@@ -268,9 +277,14 @@ def select_candidates_single_objective(
 
     grid_for_feas = grid.detach().cpu().numpy()
     feas_arr = np.array(_feasible_mask(grid_for_feas.tolist(), req, params), dtype=bool)
-    # If sum projection left every sample ratio-infeasible we still have to
-    # return *something*; fall back to ranking on score alone and rely on the
-    # post-hoc ratio-repair below to land in the feasible region.
+    # Combine input-space feasibility (sum / bounds / ratio) with PC-envelope
+    # feasibility (PCA GP trained on z_norm in [0,1]^k). The envelope filter
+    # is applied softly: if no sample is both input-feasible and in-envelope,
+    # we back off to input-feasibility alone, then to score-only ranking.
+    if use_pca_model and in_envelope is not None:
+        combined = feas_arr & in_envelope
+        if combined.any():
+            feas_arr = combined
     if feas_arr.any():
         score = np.where(feas_arr, score, -np.inf)
     top_idx = np.argsort(score)[-n:][::-1]
@@ -281,6 +295,10 @@ def select_candidates_single_objective(
     if use_pca_model and pca is not None:
         z_raw = pca.transform(cand_input_np)
         z_norm = (z_raw - pc_mins) / pc_range
+        # Safety net: post-enforcement can drift slightly across the [0,1]
+        # boundary. Clip so the returned candidate is strictly in-envelope
+        # and the GP surface plot shows predictions inside the surface.
+        z_norm = np.clip(z_norm, 0.0, 1.0)
         return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
     return torch.tensor(cand_input_np, dtype=tdtype, device=tdevice)
 
@@ -364,6 +382,7 @@ def select_candidates_multiobjective(
             x_in = _enforce_ratio_constraints_np(x_in, params, req)
             x_in = _enforce_sum_constraints_np(x_in, params, req)
             z_norm = (pca.transform(x_in) - pc_mins) / pc_range
+            z_norm = np.clip(z_norm, 0.0, 1.0)
             return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         x_in = _enforce_sum_constraints_np(cand_np, params, req)
         x_in = _enforce_ratio_constraints_np(x_in, params, req)
@@ -380,8 +399,13 @@ def select_candidates_multiobjective(
     # that the feasibility check further down is not a no-op.
     grid_input_np = _enforce_sum_constraints_np(grid.detach().cpu().numpy(), params, req)
     grid = torch.tensor(grid_input_np, dtype=tdtype, device=tdevice)
+    in_envelope = None
     if use_pca_model and pca is not None:
         z_norm = _input_space_to_z_norm(grid_input_np, pca, pc_mins, pc_range)
+        # See single-objective counterpart: GP is trained on z_norm in
+        # [0,1]^k; track which Sobol samples stay in-envelope so the
+        # feasibility mask can prefer them over PC extrapolations.
+        in_envelope = np.all((z_norm >= 0.0) & (z_norm <= 1.0), axis=1)
         Zgrid = torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         posts = [m.posterior(Zgrid) for m in model.models]
     else:
@@ -450,6 +474,10 @@ def select_candidates_multiobjective(
         score += score_k
     grid_for_feas = grid.detach().cpu().numpy()
     feas_arr = np.array(_feasible_mask(grid_for_feas.tolist(), req, params), dtype=bool)
+    if use_pca_model and in_envelope is not None:
+        combined = feas_arr & in_envelope
+        if combined.any():
+            feas_arr = combined
     if feas_arr.any():
         score = np.where(feas_arr, score, -np.inf)
     top_idx = np.argsort(score)[-n:][::-1]
@@ -460,5 +488,6 @@ def select_candidates_multiobjective(
     if use_pca_model and pca is not None:
         z_raw = pca.transform(cand_np)
         z_norm = (z_raw - pc_mins) / pc_range
+        z_norm = np.clip(z_norm, 0.0, 1.0)
         return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
     return torch.tensor(cand_np, dtype=tdtype, device=tdevice)

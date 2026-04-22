@@ -89,12 +89,17 @@ def build_linear_constraints(
         j = int(rc.get("j", -1))
         if not (0 <= i < dim and 0 <= j < dim) or i == j:
             continue
+        # BoTorch's optimize_acqf uses >= rhs semantics for inequality tuples
+        # (see the sum encoding above). Ratio bounds must be rewritten in the
+        # same direction:
+        #   x_i / x_j <= max_ratio  <=>  max_ratio * x_j - x_i >= 0
+        #   x_i / x_j >= min_ratio  <=>  x_i - min_ratio * x_j >= 0
         if rc.get("max_ratio") is not None:
             mr = float(rc["max_ratio"])
-            ineq.append(([i, j], [1.0, -mr], 0.0))
+            ineq.append(([i, j], [-1.0, mr], 0.0))
         if rc.get("min_ratio") is not None:
             mrn = float(rc["min_ratio"])
-            ineq.append(([i, j], [-1.0, mrn], 0.0))
+            ineq.append(([i, j], [1.0, -mrn], 0.0))
     return ineq, eqpairs
 
 

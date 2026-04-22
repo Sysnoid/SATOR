@@ -65,11 +65,12 @@ def test_build_linear_constraints_sum_and_ratio():
     assert has_constraint([0, 1], [1.0, 1.0], 1.0)
     assert has_constraint([0, 1], [-1.0, -1.0], -1.0)
 
-    # Ratio bounds encoded as linear inequalities on (a, c)
-    # a/c <= 2.0  => a - 2.0*c <= 0
-    assert has_constraint([0, 2], [1.0, -2.0], 0.0)
-    # a/c >= 0.5  => -a + 0.5*c <= 0
-    assert has_constraint([0, 2], [-1.0, 0.5], 0.0)
+    # Ratio bounds encoded as linear inequalities on (a, c) in the
+    # `sum(coeffs * x) >= rhs` convention used by BoTorch's optimize_acqf.
+    # a/c <= 2.0  =>  2.0*c - a >= 0
+    assert has_constraint([0, 2], [-1.0, 2.0], 0.0)
+    # a/c >= 0.5  =>  a - 0.5*c >= 0
+    assert has_constraint([0, 2], [1.0, -0.5], 0.0)
 
 
 def test_feasible_mask_sum_and_ratio():
