@@ -63,6 +63,16 @@ or NVIDIA GPU.
 - JSON examples use the same field names as the API; unspecified fields fall back to defaults.
 - All HTTP examples assume a base URL of `http://localhost:8080` (or `https://localhost:8443` when TLS is enabled) and an API key passed via the `x-api-key` header.
 
+### Figures and assets
+
+Figures live under [`docs/assets/`](assets/) (e.g. `docs/assets/examples/*.png`)
+and are referenced from markdown with **relative paths**, for example
+`![caption](assets/examples/demo_09_gp_surfaces.png)` from `docs/13-examples.md`.
+This is the format Docusaurus resolves as a webpack import, so no additional
+static-asset allowlist is required by the downstream site build.
+Do not use leading-slash (`/assets/...`) or `static/`-prefixed paths; they
+will break the in-repo markdown preview and the Docusaurus build.
+
 ## Support
 
 - Release notes live in [`CHANGELOG.md`](../CHANGELOG.md).

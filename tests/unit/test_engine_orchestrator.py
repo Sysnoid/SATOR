@@ -226,3 +226,55 @@ def test_orchestrator_pca_ratio_reconstructed():
         # Sum-to-one should still hold.
         s = sum(p["candidate"][n] for n in ("a", "lac", "mcc", "d"))
         assert abs(s - 1.0) < 1e-2
+
+
+def test_orchestrator_botorch_ratio_only_no_sum_no_pca():
+    """BoTorch ``optimize_acqf`` must honour a standalone ratio constraint.
+
+    Regression test for the ratio-tuple sign inversion in
+    ``build_linear_constraints``: ratio inequalities were being emitted in
+    ``<= rhs`` form but ``optimize_acqf`` consumes the same tuples as
+    ``>= rhs``. The sum encoding happened to survive this by +/- symmetry;
+    ratio constraints silently inverted min/max and collapsed the feasible
+    polytope. Demo_06 exercised this path and failed with
+    "No feasible point found. Constraint polytope appears empty."
+
+    This test mirrors demo_06 exactly: single-objective ``min``, ``qei``
+    acquisition, no sum constraint, no PCA, only a ratio window. Every
+    returned prediction must satisfy ``A / B`` in ``[min_ratio, max_ratio]``.
+    """
+    rng = np.random.default_rng(31)
+    X = rng.uniform(low=[0.1, 0.1], high=[10.0, 10.0], size=(50, 2))
+    # Same quadratic bowl as demo_06 so the optimum (4, 3) is inside the band.
+    Y = ((X[:, 0] - 4.0) ** 2 + (X[:, 1] - 3.0) ** 2)[:, None]
+
+    params = [
+        {"name": "A", "type": "float", "min": 0.1, "max": 10.0},
+        {"name": "B", "type": "float", "min": 0.1, "max": 10.0},
+    ]
+    min_r, max_r = 0.5, 2.0
+    req = OptimizeRequest(
+        dataset={"X": X.tolist(), "Y": Y.tolist()},
+        search_space={"parameters": params},
+        objectives={"f": {"goal": "min"}},
+        optimization_config=OptimizationConfig(
+            acquisition="qei",
+            batch_size=4,
+            max_evaluations=10,
+            seed=101,
+            ratio_constraints=[{"i": 0, "j": 1, "min_ratio": min_r, "max_ratio": max_r}],
+            use_pca=False,
+            return_maps=False,
+        ),
+    )
+    res = run_optimization(req, device="cpu")
+    preds = res["predictions"]
+    assert len(preds) == 4
+    tol = 1e-3
+    for p in preds:
+        a = p["candidate"]["A"]
+        b = p["candidate"]["B"]
+        ratio = a / max(b, 1e-12)
+        assert min_r - tol <= ratio <= max_r + tol, (
+            f"ratio {ratio:.4f} violates [{min_r}, {max_r}]"
+        )

@@ -1,0 +1,37 @@
+# Minimal line-ending policy: normalize the file types that were producing
+# CRLF/LF churn on Windows checkouts to LF on check-in, without forcing a
+# repository-wide renormalization. Binary assets are pinned to -text so git
+# never touches them.
+
+# Text formats we want as LF on disk and in the repo
+*.py   text eol=lf
+*.pyi  text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.cfg  text eol=lf
+*.ini  text eol=lf
+*.sh   text eol=lf
+Dockerfile   text eol=lf
+Dockerfile.* text eol=lf
+
+# Windows-native scripts stay CRLF (cmd.exe / PowerShell expect it)
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets -- never munge
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.pkl  binary
+*.npy  binary
+*.npz  binary
+*.pt   binary
+*.onnx binary
