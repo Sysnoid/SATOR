@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
-
 import numpy as np
 from sklearn.decomposition import PCA
 
 
-def fit_pca(combined: np.ndarray, n_components: int, scaling: Optional[str] = None) -> Tuple[PCA, Dict[str, np.ndarray]]:
+def fit_pca(combined: np.ndarray, n_components: int, scaling: str | None = None) -> tuple[PCA, dict[str, np.ndarray]]:
     X = combined.astype(float)
     if scaling and scaling.lower() in {"standardize", "minmax"}:
         if scaling.lower() == "standardize":
@@ -32,5 +30,3 @@ def fit_pca(combined: np.ndarray, n_components: int, scaling: Optional[str] = No
 
 def denormalize_coords(coords01: np.ndarray, pc_mins: np.ndarray, pc_maxs: np.ndarray) -> np.ndarray:
     return coords01 * (pc_maxs - pc_mins) + pc_mins
-
-

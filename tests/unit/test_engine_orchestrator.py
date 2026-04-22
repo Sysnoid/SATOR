@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from sator_os_engine.core.models.optimize import OptimizeRequest, OptimizationConfig
+from sator_os_engine.core.models.optimize import OptimizationConfig, OptimizeRequest
 from sator_os_engine.core.optimizer.mobo_engine import run_optimization
 
 
@@ -110,10 +110,7 @@ def test_orchestrator_constraints_sum_and_ratio():
     for p in preds:
         a = p["candidate"]["a"]
         b = p["candidate"]["b"]
-        c = p["candidate"]["c"]
         # Sum enforcement
         assert abs((a + b) - 1.0) < 1e-2
         # Note: ratio constraints are used as feasibility filters prior to selection,
         # but are not enforced post-selection. We do not assert ratio bounds here.
-
-

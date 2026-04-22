@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from sator_os_engine.core.models.optimize import OptimizeRequest, OptimizationConfig
+from sator_os_engine.core.models.optimize import OptimizationConfig, OptimizeRequest
 from sator_os_engine.core.optimizer.mobo_engine import run_optimization
 
 
@@ -41,5 +41,3 @@ def test_sum_constraint_enforced_in_candidates():
         a = p["candidate"]["a"]
         b = p["candidate"]["b"]
         assert abs((a + b) - 1.0) < 1e-2
-
-

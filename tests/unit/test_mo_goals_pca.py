@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from sator_os_engine.core.models.optimize import OptimizeRequest, OptimizationConfig
+from sator_os_engine.core.models.optimize import OptimizationConfig, OptimizeRequest
 from sator_os_engine.core.optimizer.mobo_engine import run_optimization
 
 
@@ -64,5 +64,3 @@ def test_mo_goals_with_pca_maps():
     assert gm is not None
     assert gm.get("dimension") == 2
     assert "means" in gm["maps"] and "variances" in gm["maps"]
-
-

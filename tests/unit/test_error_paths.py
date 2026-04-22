@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from sator_os_engine.core.models.optimize import OptimizeRequest, OptimizationConfig
+from sator_os_engine.core.models.optimize import OptimizationConfig, OptimizeRequest
 from sator_os_engine.core.optimizer.mobo_engine import run_optimization
 
 
@@ -39,7 +39,12 @@ def test_objectives_mismatch_tolerated():
     Y = (np.sum(X, axis=1))[:, None]  # shape (n, 1)
     req = OptimizeRequest(
         dataset={"X": X.tolist(), "Y": Y.tolist()},
-        search_space={"parameters": [{"name": "x1", "type": "float", "min": 0.0, "max": 1.0}, {"name": "x2", "type": "float", "min": 0.0, "max": 1.0}]},
+        search_space={
+            "parameters": [
+                {"name": "x1", "type": "float", "min": 0.0, "max": 1.0},
+                {"name": "x2", "type": "float", "min": 0.0, "max": 1.0},
+            ]
+        },
         objectives={"o1": {"goal": "min"}, "o2": {"goal": "max"}},
         optimization_config=OptimizationConfig(acquisition="qnehvi", batch_size=2, max_evaluations=5, seed=2),
     )
@@ -52,7 +57,12 @@ def test_request_pca_maps_without_pca_raises():
     Y = (np.sum((X - 0.5) ** 2, axis=1))[:, None]
     req = OptimizeRequest(
         dataset={"X": X.tolist(), "Y": Y.tolist()},
-        search_space={"parameters": [{"name": "x1", "type": "float", "min": 0.0, "max": 1.0}, {"name": "x2", "type": "float", "min": 0.0, "max": 1.0}]},
+        search_space={
+            "parameters": [
+                {"name": "x1", "type": "float", "min": 0.0, "max": 1.0},
+                {"name": "x2", "type": "float", "min": 0.0, "max": 1.0},
+            ]
+        },
         objectives={"o": {"goal": "min"}},
         optimization_config=OptimizationConfig(
             acquisition="qei",
@@ -60,12 +70,10 @@ def test_request_pca_maps_without_pca_raises():
             max_evaluations=5,
             seed=3,
             return_maps=True,
-            map_space="pca",   # request PCA maps
-            use_pca=False,     # but PCA not enabled
+            map_space="pca",  # request PCA maps
+            use_pca=False,  # but PCA not enabled
             pca_dimension=2,
         ),
     )
     with pytest.raises(RuntimeError):
         run_optimization(req, device="cpu")
-
-

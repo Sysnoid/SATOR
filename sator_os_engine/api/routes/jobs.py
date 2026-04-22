@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from starlette.status import HTTP_404_NOT_FOUND, HTTP_403_FORBIDDEN
+from starlette.status import HTTP_403_FORBIDDEN, HTTP_404_NOT_FOUND
 
 from ...runtime.jobs import JobStatus
-from ..deps import get_job_store, get_api_key
-
+from ..deps import get_api_key, get_job_store
 
 router = APIRouter()
 
@@ -30,5 +29,3 @@ async def get_job_result(job_id: str, api_key: str = Depends(get_api_key), job_s
     if job.status != JobStatus.COMPLETED:
         return {"status": job.status, "error": job.error}
     return job.result or {}
-
-

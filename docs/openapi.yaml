@@ -3,11 +3,27 @@ info:
   title: SATOR OS Engine API
   version: "0.2.0"
   description: |
-    Public API contract for the SATOR OS Engine. Asynchronous optimization via /v1/optimize returning a job_id; poll job result via /v1/jobs/{job_id}/result.
-    Security via x-api-key header. Responses can optionally include visualization map descriptors (2D/3D) and PCA encoding diagnostics.
+    Public HTTP/JSON API for the SATOR OS Engine. Optimization and reconstruction
+    are asynchronous: POST to submit, then poll `/v1/jobs/{job_id}/result`.
+    All requests except health and metrics must carry `x-api-key`.
+
+    Acquisition function dispatch (multi-objective `min`/`max` only):
+      - `qnehvi`      → qLogExpectedHypervolumeImprovement (default)
+      - `qehvi`       → qExpectedHypervolumeImprovement
+      - `qnoisyehvi`  → qNoisyExpectedHypervolumeImprovement
+      - `parego`      → qLogExpectedImprovement on a Chebyshev-scalarized objective
+      - `qei`         → qLogExpectedImprovement
+      - `qpi`         → qProbabilityOfImprovement
+      - `qucb`        → qUpperConfidenceBound
+
+    Any problem whose objectives include advanced goal types (`target`,
+    `within_range`, threshold goals, `explore`, `improve`) uses the Sobol +
+    posterior-scoring path regardless of the `acquisition` string.
 servers:
-  - url: http://localhost:8000
-    description: Local development
+  - url: http://localhost:8080
+    description: Local development (HTTP)
+  - url: https://localhost:8443
+    description: Local development (HTTPS)
 security:
   - ApiKeyAuth: []
 paths:
@@ -65,6 +81,68 @@ paths:
           description: Bad request
         '401':
           description: Unauthorized (missing/invalid API key)
+  /v1/reconstruct:
+    post:
+      summary: Submit a reconstruction job
+      operationId: submitReconstruct
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReconstructionRequest'
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OptimizeAccepted'
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized (missing/invalid API key)
+  /livez:
+    get:
+      summary: Liveness probe
+      operationId: livez
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+  /readyz:
+    get:
+      summary: Readiness probe
+      operationId: readyz
+      security: []
+      responses:
+        '200':
+          description: Process is ready to accept work
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+  /metrics:
+    get:
+      summary: Prometheus metrics (when SATOR_ENABLE_METRICS=true)
+      operationId: metrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus exposition-format text
+          content:
+            text/plain:
+              schema: { type: string }
   /v1/jobs/{job_id}:
     get:
       summary: Get job status
@@ -98,6 +176,7 @@ paths:
               schema:
                 oneOf:
                   - $ref: '#/components/schemas/OptimizeJobResult'
+                  - $ref: '#/components/schemas/ReconstructionJobResult'
                   - $ref: '#/components/schemas/JobFailure'
 components:
   securitySchemes:
@@ -271,7 +350,13 @@ components:
       properties:
         acquisition:
           type: string
-          enum: [qnehvi, qehvi, parego, qei, qpi, qucb]
+          description: |
+            Acquisition function. Multi-objective `min`/`max` problems dispatch to the named BoTorch class:
+            `qnehvi` (default), `qehvi`, `qnoisyehvi`, `parego`, `qei`, `qpi`, `qucb`, or `sobol`.
+            Problems with advanced goal types (`target`, thresholds, `within_range`, `explore`, `improve`)
+            always use the Sobol + posterior-scoring path regardless of this field.
+          enum: [qnehvi, qehvi, qnoisyehvi, parego, qei, qpi, qucb, sobol]
+          default: qnehvi
         batch_size:
           type: integer
           minimum: 1
@@ -349,6 +434,81 @@ components:
         min_ratio: { type: number }
         max_ratio: { type: number }
       required: [i, j]
+    ReconstructionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        coordinates:
+          type: array
+          items: { type: number }
+        pca_info:
+          type: object
+          additionalProperties: false
+          properties:
+            pc_mins: { type: array, items: { type: number } }
+            pc_maxs: { type: array, items: { type: number } }
+            components:
+              type: array
+              items:
+                type: array
+                items: { type: number }
+            mean:
+              type: array
+              items: { type: number }
+        bounds:
+          type: object
+          additionalProperties: false
+          properties:
+            ingredients:
+              type: array
+              items:
+                type: array
+                items: { type: number }
+                minItems: 2
+                maxItems: 2
+            parameters:
+              type: array
+              items:
+                type: array
+                items: { type: number }
+                minItems: 2
+                maxItems: 2
+        n_ingredients: { type: integer, minimum: 0 }
+        sum_target: { type: number, default: 1.0 }
+        target_precision: { type: number, default: 1.0e-7 }
+        ratio_constraints:
+          type: array
+          items: { $ref: '#/components/schemas/RatioConstraint' }
+        ingredient_names:
+          type: array
+          items: { type: string }
+        parameter_names:
+          type: array
+          items: { type: string }
+      required: [coordinates, bounds, n_ingredients]
+    ReconstructionJobResult:
+      type: object
+      additionalProperties: false
+      properties:
+        success: { type: boolean }
+        reconstructed_formulation:
+          type: object
+          additionalProperties: false
+          properties:
+            ingredients: { type: array, items: { type: number } }
+            parameters:  { type: array, items: { type: number } }
+            combined:    { type: array, items: { type: number } }
+            by_name:
+              type: object
+              additionalProperties: { type: number }
+        reconstruction_metrics:
+          type: object
+          additionalProperties: true
+          properties:
+            final_error: { type: number }
+            iterations:  { type: integer }
+            method:      { type: string }
+      required: [success]
     OptimizeJobResult:
       type: object
       additionalProperties: false
@@ -417,6 +577,9 @@ components:
             combined:
               type: array
               items: { type: number }
+            by_name:
+              type: object
+              additionalProperties: { type: number }
             success: { type: boolean }
             final_error: { type: number }
     EncodingInfo:

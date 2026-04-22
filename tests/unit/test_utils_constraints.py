@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from sator_os_engine.core.optimizer.utils import build_linear_constraints, feasible_mask, enforce_sum_constraints_np
+from sator_os_engine.core.optimizer.utils import build_linear_constraints, enforce_sum_constraints_np, feasible_mask
 
 
 def _make_req(sum_constraints=None, ratio_constraints=None):
@@ -84,10 +84,10 @@ def test_feasible_mask_sum_and_ratio():
 
     # Points: [a, b, c]
     pts = [
-        [0.5, 0.5, 0.5],   # sum ok (1.0), ratio a/c=1.0 within [0.5, 2.0] -> True
-        [0.6, 0.6, 0.5],   # sum violates (1.2) -> False
-        [0.9, 0.1, 0.3],   # sum ok, ratio a/c=3.0 > 2.0 -> False
-        [0.2, 0.8, 0.6],   # sum ok, ratio a/c≈0.333 < 0.5 -> False
+        [0.5, 0.5, 0.5],  # sum ok (1.0), ratio a/c=1.0 within [0.5, 2.0] -> True
+        [0.6, 0.6, 0.5],  # sum violates (1.2) -> False
+        [0.9, 0.1, 0.3],  # sum ok, ratio a/c=3.0 > 2.0 -> False
+        [0.2, 0.8, 0.6],  # sum ok, ratio a/c≈0.333 < 0.5 -> False
     ]
     mask = feasible_mask(pts, req, params, tol=1e-6)
     assert mask == [True, False, False, False]
@@ -107,7 +107,7 @@ def test_enforce_sum_constraints_np_respects_target_and_bounds():
         [
             [0.3, 0.3, 0.1],  # sum 0.6
             [0.7, 0.7, 0.2],  # sum 1.4
-            [1.2, -0.1, 0.5], # outside bounds, will be clipped then renormalized
+            [1.2, -0.1, 0.5],  # outside bounds, will be clipped then renormalized
         ],
         dtype=float,
     )
@@ -120,5 +120,3 @@ def test_enforce_sum_constraints_np_respects_target_and_bounds():
     assert np.allclose(s, 1.0, atol=1e-2)
     # Check bounds respected
     assert np.all((Xe >= 0.0) & (Xe <= 1.0))
-
-

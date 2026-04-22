@@ -1,0 +1,39 @@
+# SATOR in Docker — CPU by default; GPU behind a profile (needs NVIDIA Container Toolkit).
+#
+# CPU:   docker compose up --build
+# GPU:   docker compose --profile gpu up --build
+#
+# Override port or API key via .env (see .env.example).
+
+services:
+  sator-cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sator:cpu
+    ports:
+      - "${SATOR_HOST_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      SATOR_DEVICE: cpu
+      SATOR_HTTP_HOST: 0.0.0.0
+      SATOR_HTTP_PORT: "8080"
+
+  sator-gpu:
+    profiles:
+      - gpu
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: sator:gpu
+    ports:
+      - "${SATOR_GPU_HOST_PORT:-8081}:8080"
+    env_file:
+      - .env
+    environment:
+      SATOR_DEVICE: cuda
+      SATOR_CUDA_DEVICE: "0"
+      SATOR_HTTP_HOST: 0.0.0.0
+      SATOR_HTTP_PORT: "8080"
+    gpus: all

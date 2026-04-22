@@ -1,0 +1,42 @@
+# SATOR — NVIDIA GPU (uses requirements-cuda.txt: PyTorch cu128)
+# Host: install nvidia-container-toolkit and use `docker run --gpus all`
+# Build:  docker build -f Dockerfile.cuda -t sator:gpu .
+# Run:    docker run --rm --gpus all -p 8080:8080 -e SATOR_API_KEY=dev-key -e SATOR_DEVICE=cuda sator:gpu
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+        python3-pip \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && ln -sf /usr/bin/pip3 /usr/local/bin/pip
+
+COPY requirements-cuda.txt pyproject.toml README.md ./
+COPY sator_os_engine ./sator_os_engine
+
+RUN pip install --upgrade pip \
+    && pip install -r requirements-cuda.txt \
+    && pip install -e . --no-deps
+
+ENV SATOR_HTTP_HOST=0.0.0.0 \
+    SATOR_HTTP_PORT=8080 \
+    SATOR_DEVICE=cuda \
+    SATOR_CUDA_DEVICE=0
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=3)"
+
+CMD ["sator-server"]

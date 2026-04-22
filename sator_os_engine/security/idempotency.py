@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, Optional, Tuple
 
 
 class IdempotencyStore:
     def __init__(self, ttl_sec: int = 600) -> None:
         self.ttl_sec = ttl_sec
-        self._store: Dict[Tuple[str, str], Tuple[float, str]] = {}
+        self._store: dict[tuple[str, str], tuple[float, str]] = {}
 
     def put(self, api_key: str, idem_key: str, job_id: str) -> None:
         self._store[(api_key, idem_key)] = (time.time(), job_id)
 
-    def get(self, api_key: str, idem_key: str) -> Optional[str]:
+    def get(self, api_key: str, idem_key: str) -> str | None:
         key = (api_key, idem_key)
         item = self._store.get(key)
         if not item:
@@ -23,4 +22,13 @@ class IdempotencyStore:
             return None
         return job_id
 
+    def sweep_expired(self) -> int:
+        """Remove all entries past ``ttl_sec`` (even if not read). Returns count removed."""
+        now = time.time()
+        dead = [k for k, (ts, _) in self._store.items() if (now - ts) > self.ttl_sec]
+        for k in dead:
+            del self._store[k]
+        return len(dead)
 
+    def __len__(self) -> int:
+        return len(self._store)

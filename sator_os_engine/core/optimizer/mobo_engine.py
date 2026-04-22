@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from contextlib import suppress
+from typing import Any
 
 import numpy as np
+import torch
 
 from ..models.optimize import OptimizeRequest
+from .device import resolve_torch_device
+from .maps import compute_gp_maps
 from .utils import (
-    sample_candidates as _sample_candidates,
-    dummy_objective as _dummy_objective,
-    pareto_front as _pareto_front,
-    build_linear_constraints as _build_linear_constraints,
-    feasible_mask as _feasible_mask,
-    enforce_sum_constraints_np as _enforce_sum_constraints_np,
     infer_ingredient_and_param_indices as _infer_ingredient_and_param_indices,
 )
-from .maps import compute_gp_maps
-
+from .utils import (
+    pareto_front as _pareto_front,
+)
 
 ## moved to utils.sample_candidates
 
@@ -38,7 +37,7 @@ from .maps import compute_gp_maps
 ## moved to utils.infer_ingredient_and_param_indices
 
 
-def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any]:
+def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int = 0) -> dict[str, Any]:
     cfg = req.optimization_config
     num = int(cfg.batch_size)
     rng_seed = cfg.seed
@@ -50,16 +49,18 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
 
     if X is not None and Y is not None:
         try:
-            import torch
-            from botorch.utils.multi_objective.box_decompositions import NondominatedPartitioning
-
-            tdevice = torch.device("cuda") if (device == "cuda" and torch.cuda.is_available()) else torch.device("cpu")
+            tdevice, cuda_idx = resolve_torch_device(device, cuda_device)
             tdtype = torch.double
 
             X_np = np.asarray(X, dtype=float)
             params = req.search_space.get("parameters", [])
-            sums_cfg = (req.optimization_config.sum_constraints or []) if hasattr(req.optimization_config, "sum_constraints") else []
-            from .preprocess import enforce_sum_to_target_training, fit_pca_normalize, z_norm_to_input
+            sums_cfg = (
+                (req.optimization_config.sum_constraints or [])
+                if hasattr(req.optimization_config, "sum_constraints")
+                else []
+            )
+            from .preprocess import enforce_sum_to_target_training, fit_pca_normalize
+
             X_np = enforce_sum_to_target_training(X_np, sums_cfg)
             use_pca_model = bool(req.optimization_config.use_pca and (req.optimization_config.pca_dimension or 0) >= 1)
             pca = None
@@ -78,7 +79,9 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
             tY = torch.tensor(Y_np * signs, dtype=tdtype, device=tdevice)
             n_obj = tY.shape[-1]
 
-            from .gp import build_models, bounds_input as gp_bounds_input, bounds_model_pca
+            from .gp import bounds_input as gp_bounds_input
+            from .gp import bounds_model_pca, build_models
+
             model = build_models(tX, tY, cfg)
 
             # Bounds from search_space (input space)
@@ -87,23 +90,18 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
 
             # If modeling in PCA, define model bounds from observed Z mins/maxs
             if use_pca_model and pca is not None:
-                bounds_model = gp_bounds_model_pca = bounds_model_pca(X_model.shape[1], tdtype, tdevice)
+                bounds_model = bounds_model_pca(X_model.shape[1], tdtype, tdevice)
             else:
                 bounds_model = bounds_input
 
-            # Ref point for hypervolume (lower than all observed tY for maximize)
-            rp = tY.min(dim=0).values - 0.1 * tY.abs().mean(dim=0).clamp_min(1.0)
+            from .acquisition import select_candidates_multiobjective, select_candidates_single_objective
 
-            # Handle special single-objective goal variants via grid scoring
-            obj_cfgs = list(req.objectives.values()) if isinstance(req.objectives, dict) else []
-            acq_name = (req.optimization_config.acquisition or "qnehvi").lower()
-
-            from .acquisition import select_candidates_single_objective, select_candidates_multiobjective
             if n_obj == 1:
                 cand = select_candidates_single_objective(
                     model=model,
                     params=params,
                     bounds_input=bounds_input,
+                    bounds_model=bounds_model,
                     use_pca_model=use_pca_model,
                     pca=pca,
                     pc_mins=pc_mins if use_pca_model and pca is not None else None,
@@ -116,9 +114,12 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
                     Y_np=Y_np,
                 )
             else:
-                goals = [str(cfg.get("goal", "min")).lower() for cfg in (list(req.objectives.values()) if isinstance(req.objectives, dict) else [])]
+                goals = [
+                    str(cfg.get("goal", "min")).lower()
+                    for cfg in (list(req.objectives.values()) if isinstance(req.objectives, dict) else [])
+                ]
                 cand = select_candidates_multiobjective(
-                        model=model,
+                    model=model,
                     params=params,
                     bounds_input=bounds_input,
                     bounds_model=bounds_model,
@@ -133,13 +134,13 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
                     req=req,
                     goals=goals,
                     Y_np=Y_np,
-                    )
-                
+                    train_X=tX,
+                )
 
             # Predict means for candidates (convert back to minimization by negating)
-            preds: List[Dict[str, Any]] = []
+            preds: list[dict[str, Any]] = []
             for i in range(cand.shape[0]):
-                x_input = cand[i:i+1]
+                x_input = cand[i : i + 1]
                 if use_pca_model and pca is not None:
                     # model input is normalized PCA; keep as-is for posterior
                     z_norm = x_input.detach().cpu().numpy()
@@ -160,7 +161,7 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
                     variances.append(float(vr))
                 x_params_vec = x_params.reshape(-1)
                 cand_dict = {p["name"]: float(x_params_vec[j]) for j, p in enumerate(params)}
-                pred_item: Dict[str, Any] = {"candidate": cand_dict, "objectives": means, "variances": variances}
+                pred_item: dict[str, Any] = {"candidate": cand_dict, "objectives": means, "variances": variances}
                 if use_pca_model and pca is not None:
                     # Include encoded PCA coordinates and reconstructed formulation (sum-to-one respected)
                     enc_coords_raw = z_np[0].tolist()
@@ -168,15 +169,22 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
                     pred_item["encoded"] = enc_coords_norm
                     try:
                         from ...reconstruction.slsqp_reconstructor import reconstruct as slsqp_reconstruct
+
                         ing_idx, other_idx = _infer_ingredient_and_param_indices(params, req)
                         ing_bounds = [[float(params[k]["min"]), float(params[k]["max"])] for k in ing_idx]
                         par_bounds = [[float(params[k]["min"]), float(params[k]["max"])] for k in other_idx]
                         sum_target = 1.0
-                        sums = (req.optimization_config.sum_constraints or []) if hasattr(req.optimization_config, "sum_constraints") else []
+                        sums = (
+                            (req.optimization_config.sum_constraints or [])
+                            if hasattr(req.optimization_config, "sum_constraints")
+                            else []
+                        )
                         if sums:
                             st = sums[0].get("target_sum")
                             if st is not None:
                                 sum_target = float(st)
+                        ing_names = [str(params[k]["name"]) for k in ing_idx]
+                        par_names = [str(params[k]["name"]) for k in other_idx]
                         rec = slsqp_reconstruct(
                             target_encoded=np.array(enc_coords_raw, dtype=float),
                             encoder_components=pca.components_,
@@ -187,6 +195,8 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
                             target_precision=1e-7,
                             sum_target=sum_target,
                             ratio_constraints=None,
+                            ingredient_names=ing_names,
+                            parameter_names=par_names,
                         )
                         pred_item["reconstructed"] = {
                             "ingredients": rec.get("ingredients", []),
@@ -195,30 +205,31 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
                             "success": rec.get("success", False),
                             "final_error": rec.get("final_error", None),
                         }
+                        if "solution_by_name" in rec:
+                            pred_item["reconstructed"]["by_name"] = rec["solution_by_name"]
                     except Exception:
                         pass
                 preds.append(pred_item)
 
-            pareto_idx = _pareto_front([p["objectives"] for p in preds])
+            # Pareto in a minimization frame: multiply max objectives by -1 (same as -signs)
+            pareto_idx = _pareto_front([p["objectives"] for p in preds], minimize_frame=-signs)
             pareto = {"indices": pareto_idx, "points": [preds[i]["objectives"] for i in pareto_idx]}
 
             encoding_info = {"pc_mins": [], "pc_maxs": []} if cfg.use_pca else None
             if use_pca_model and pca is not None:
-                try:
+                with suppress(Exception):
                     encoding_info = {
                         "pc_mins": pc_mins.tolist(),
                         "pc_maxs": pc_maxs.tolist(),
                         "components": pca.components_.tolist(),
                         "mean": pca.mean_.tolist(),
                     }
-                except Exception:
-                    pass
 
-            response: Dict[str, Any] = {
+            response: dict[str, Any] = {
                 "predictions": preds,
                 "pareto": pareto,
                 "encoding_info": encoding_info,
-                "diagnostics": {"device": str(tdevice)},
+                "diagnostics": {"device": str(tdevice), "cuda_device_index": cuda_idx},
                 "objectives": req.objectives if isinstance(req.objectives, dict) else {},
                 "encoded_dataset": Z.tolist() if (use_pca_model and pca is not None) else None,
             }
@@ -248,11 +259,8 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu") -> Dict[str, Any
 
             return response
         except Exception as e:
-            # No fallback: propagate explicit failure so the job reports the error with traceback
-            import traceback as _tb
-            raise RuntimeError(f"Optimization failed: {e}: {_tb.format_exc()}")
+            # Avoid embedding tracebacks in the error string (leaks paths; job result may be logged).
+            raise RuntimeError(f"Optimization failed: {e}") from e
 
     # If no dataset was provided, fail explicitly
     raise ValueError("OptimizeRequest must include dataset.X and dataset.Y")
-
-

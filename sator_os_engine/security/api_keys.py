@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import hmac
-from typing import Optional
 
-from fastapi import Depends, HTTPException, Header
+from fastapi import Depends, Header, HTTPException
 from starlette.status import HTTP_401_UNAUTHORIZED
 
 from ..settings import Settings, get_settings
@@ -15,10 +14,10 @@ def _constant_time_equals(a: str, b: str) -> bool:
 
 def get_api_key(
     settings: Settings = Depends(get_settings),
-    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
-    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> str:
-    provided: Optional[str] = None
+    provided: str | None = None
     if x_api_key:
         provided = x_api_key.strip()
     elif authorization and authorization.lower().startswith("bearer "):
@@ -32,5 +31,3 @@ def get_api_key(
         return provided
 
     raise HTTPException(status_code=HTTP_401_UNAUTHORIZED, detail="Invalid API key")
-
-

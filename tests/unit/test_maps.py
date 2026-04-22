@@ -12,19 +12,19 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
-import torch
 import pytest
+import torch
 
-from sator_os_engine.core.optimizer.preprocess import fit_pca_normalize
-from sator_os_engine.core.optimizer.gp import build_models, bounds_input
+from sator_os_engine.core.optimizer.gp import build_models
 from sator_os_engine.core.optimizer.maps import compute_gp_maps
+from sator_os_engine.core.optimizer.preprocess import fit_pca_normalize
 
 
 def _two_obj_data(n=60, seed=0):
     rng = np.random.default_rng(seed)
     X = rng.uniform(0.0, 1.0, size=(n, 2))
-    f1 = np.sum((X - 0.3) ** 2, axis=1)         # min near 0.3
-    f2 = -np.sum((X - 0.7) ** 2, axis=1)        # max near 0.7
+    f1 = np.sum((X - 0.3) ** 2, axis=1)  # min near 0.3
+    f2 = -np.sum((X - 0.7) ** 2, axis=1)  # max near 0.7
     Y = np.stack([f1, f2], axis=1)
     return X, Y
 
@@ -135,5 +135,3 @@ def test_pca_maps_without_pca_raises():
             pc_mins=None,
             pc_range=None,
         )
-
-

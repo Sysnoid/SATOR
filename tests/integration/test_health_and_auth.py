@@ -10,6 +10,7 @@ The FastAPI app is instantiated in-memory with a configured API key.
 from __future__ import annotations
 
 import os
+
 from fastapi.testclient import TestClient
 
 from sator_os_engine.api.app import create_app
@@ -35,5 +36,3 @@ def test_auth_missing_key_rejected():
     client = _client_with_key()
     r = client.post("/v1/optimize", json={})
     assert r.status_code in (401, 403)
-
-

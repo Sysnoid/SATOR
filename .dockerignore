@@ -1,0 +1,23 @@
+# Git and local
+.git
+.gitignore
+.venv
+venv
+env
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.pytest_cache
+.ruff_cache
+htmlcov
+.coverage
+coverage.xml
+local-dev-docs
+*.log
+certs
+examples/responses
+tests/artifacts
+.vscode
+.idea
+.pre-commit-config.yaml
+agent-transcripts

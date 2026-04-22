@@ -9,7 +9,7 @@
 
 ### HTTPS (TLS) option
 - For Excel add-ins or environments that require HTTPS:
-  - Ensure local dev certs exist (see `docs/local_tls_certs.md`) under `certs/` (e.g., `certs/localhost.pem`, `certs/localhost-key.pem`). After installing `mkcert`, restart PowerShell before using it.
+  - Ensure local dev certs exist (see [`docs/11-local-https-setup.md`](../docs/11-local-https-setup.md)) under `certs/` (e.g., `certs/localhost.pem`, `certs/localhost-key.pem`). After installing `mkcert`, restart PowerShell before using it.
   - In `.env`, set `SATOR_ENABLE_TLS=true` and choose a port, conventionally `SATOR_HTTP_PORT=8443`. Keep only one `SATOR_HTTP_PORT` entry.
   - Start the server as usual (`sator-server` or `python -m sator_os_engine.server.main`); it will bind HTTPS.
   - Set the client base URL to HTTPS: `$env:SATOR_BASE_URL = "https://localhost:8443"`.
@@ -19,10 +19,34 @@
 - `pip install matplotlib scikit-learn httpx`
 
 ## 3) Run the examples
-- Branin (3D) — builds dataset, sends optimize to server, polls, plots results:
-  - `python .\examples\http_visualize_branin.py`
-- Chemical PCA — 20 formulations (9 ingredients sum-to-one + 5 params), PCA(2) maps, reconstruct a few:
-  - `python .\examples\http_chem_pca_optimize_visualize.py`
+
+The examples share a tiny helper (`examples/_common.py`) that submits the
+request, polls the job, and saves both the request and result JSON under
+`examples/responses/`. Because the helper sits next to the demos, always run
+them from the repo root so Python can resolve `import _common`:
+
+```powershell
+python .\examples\demo_01_rosenbrock_single_min.py
+```
+
+### Curated demo set (run in any order)
+
+| # | File | Demonstrates |
+|---|---|---|
+| 01 | `demo_01_rosenbrock_single_min.py` | Single-objective `min` on the Rosenbrock banana (qEI). |
+| 02 | `demo_02_ackley_target.py`         | `target` goal on Ackley — hit a specific f-value. |
+| 03 | `demo_03_himmelblau_within_range.py` | `within_range` goal on Himmelblau. |
+| 04 | `demo_04_zdt1_pareto.py`           | Multi-objective Pareto front (qNEHVI) vs. analytic ZDT1 front. |
+| 05 | `demo_05_mixture_sum_constraint.py`| 3-ingredient mixture with sum-to-one. |
+| 06 | `demo_06_ratio_constraints.py`     | Ratio constraint 0.5 ≤ A/B ≤ 2.0. |
+| 07 | `demo_07_paint_formulation.py`     | Realistic paint blend — `min`/`max`/`within_range` + sum-to-one. |
+| 08 | `demo_08_ev_electrolyte_target.py` | EV electrolyte — `target` + `within_range` + `maximize_above` + sum-to-one. |
+
+### Legacy examples (kept for continuity)
+
+- `http_visualize_branin.py` — Branin 3D surface with suggested minimum overlay.
+- `http_chem_pca_optimize_visualize.py` — 14-D chemical formulation, PCA(2) maps, reconstruction.
+- `plot_branin_surface3d.py` — in-process Branin optimization and artifact render.
 
 ## 4) Configuration
 - API key: `SATOR_API_KEY` (defaults to `dev-key`)

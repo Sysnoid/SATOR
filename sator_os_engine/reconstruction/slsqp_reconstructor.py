@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
-from scipy.optimize import minimize, NonlinearConstraint, LinearConstraint
+from scipy.optimize import LinearConstraint, NonlinearConstraint, minimize
 
 
 def _sum_constraint_factory(n_ingredients: int, target_sum: float):
@@ -15,8 +15,10 @@ def _sum_constraint_factory(n_ingredients: int, target_sum: float):
     return sum_constraint
 
 
-def _combine_bounds(ingredient_bounds: List[List[float]], parameter_bounds: List[List[float]]) -> List[Tuple[float, float]]:
-    bounds: List[Tuple[float, float]] = []
+def _combine_bounds(
+    ingredient_bounds: list[list[float]], parameter_bounds: list[list[float]]
+) -> list[tuple[float, float]]:
+    bounds: list[tuple[float, float]] = []
     bounds.extend([(float(a), float(b)) for a, b in ingredient_bounds])
     bounds.extend([(float(a), float(b)) for a, b in parameter_bounds])
     return bounds
@@ -25,14 +27,16 @@ def _combine_bounds(ingredient_bounds: List[List[float]], parameter_bounds: List
 def reconstruct(
     target_encoded: np.ndarray,
     encoder_components: np.ndarray,
-    encoder_mean: Optional[np.ndarray],
-    ingredient_bounds: List[List[float]],
-    parameter_bounds: List[List[float]],
+    encoder_mean: np.ndarray | None,
+    ingredient_bounds: list[list[float]],
+    parameter_bounds: list[list[float]],
     n_ingredients: int,
     target_precision: float = 1e-7,
     sum_target: float = 1.0,
-    ratio_constraints: Optional[List[Dict[str, float]]] = None,
-) -> Dict[str, Any]:
+    ratio_constraints: list[dict[str, float]] | None = None,
+    ingredient_names: list[str] | None = None,
+    parameter_names: list[str] | None = None,
+) -> dict[str, Any]:
     dim_x = len(ingredient_bounds) + len(parameter_bounds)
     components = np.array(encoder_components, dtype=float)
     mean = np.array(encoder_mean, dtype=float) if encoder_mean is not None else np.zeros(dim_x)
@@ -81,12 +85,14 @@ def reconstruct(
                 A[0, j] = float(min_ratio)
                 constraints.append(LinearConstraint(A, -np.inf, 0.0))
 
-    result = minimize(objective, x0, method="SLSQP", bounds=bounds, constraints=constraints, options={"ftol": target_precision})
+    result = minimize(
+        objective, x0, method="SLSQP", bounds=bounds, constraints=constraints, options={"ftol": target_precision}
+    )
 
     final_solution = result.x
     final_error = objective(final_solution)
 
-    return {
+    out: dict[str, Any] = {
         "success": bool(result.success),
         "solution": final_solution.tolist(),
         "ingredients": final_solution[:n_ingredients].tolist() if n_ingredients > 0 else [],
@@ -95,5 +101,16 @@ def reconstruct(
         "iterations": int(getattr(result, "nit", 0)),
         "method": "SLSQP_Constrained",
     }
-
-
+    if (
+        ingredient_names is not None
+        and parameter_names is not None
+        and len(ingredient_names) == n_ingredients
+        and len(parameter_names) == len(parameter_bounds)
+    ):
+        by_name: dict[str, float] = {}
+        for name, val in zip(ingredient_names, final_solution[:n_ingredients], strict=True):
+            by_name[str(name)] = float(val)
+        for name, val in zip(parameter_names, final_solution[n_ingredients:], strict=True):
+            by_name[str(name)] = float(val)
+        out["solution_by_name"] = by_name
+    return out

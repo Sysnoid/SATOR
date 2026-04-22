@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import numpy as np
 
 
-def enforce_sum_to_target_training(X: np.ndarray, sums_cfg: List[Dict[str, Any]] | None) -> np.ndarray:
+def enforce_sum_to_target_training(X: np.ndarray, sums_cfg: list[dict[str, Any]] | None) -> np.ndarray:
     if not sums_cfg:
         return X
     Xn = np.asarray(X, dtype=float).copy()
@@ -48,5 +48,3 @@ def z_norm_to_input(pca, pc_mins: np.ndarray, pc_range: np.ndarray, z_norm: np.n
 def input_to_z_norm(pca, pc_mins: np.ndarray, pc_range: np.ndarray, X: np.ndarray) -> np.ndarray:
     z_raw = pca.transform(X)
     return (z_raw - pc_mins) / pc_range
-
-

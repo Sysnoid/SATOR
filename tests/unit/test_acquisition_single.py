@@ -18,8 +18,8 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from sator_os_engine.core.optimizer.gp import build_models, bounds_input
 from sator_os_engine.core.optimizer.acquisition import select_candidates_single_objective
+from sator_os_engine.core.optimizer.gp import bounds_input, build_models
 
 
 def _make_params():
@@ -48,6 +48,7 @@ def _make_req(goal: str, *, threshold=None, range_=None, tol=0.05, var_pen=0.05)
     return SimpleNamespace(
         objectives={"f": obj},
         optimization_config=SimpleNamespace(
+            acquisition="sobol",
             target_tolerance=tol,
             target_variance_penalty=var_pen,
             sum_constraints=[],
@@ -64,7 +65,10 @@ def _posterior_mean(model, x):
 
 def test_min_goal_selects_near_minimum():
     # Linear objective: f = x1 + x2 (minimum near [0,0])
-    f = lambda X: (X[:, 0] + X[:, 1])
+
+    def f(X):
+        return X[:, 0] + X[:, 1]
+
     model, X, y = _build_gp_for_func(f, n=120, seed=1)
     params = _make_params()
     tdtype = torch.double
@@ -76,6 +80,7 @@ def test_min_goal_selects_near_minimum():
         model=model,
         params=params,
         bounds_input=b_in,
+        bounds_model=b_in,
         use_pca_model=False,
         pca=None,
         pc_mins=None,
@@ -94,7 +99,10 @@ def test_min_goal_selects_near_minimum():
 
 def test_max_goal_selects_near_maximum():
     # Linear objective: f = x1 + x2 (maximum near [1,1])
-    f = lambda X: (X[:, 0] + X[:, 1])
+
+    def f(X):
+        return X[:, 0] + X[:, 1]
+
     model, X, y = _build_gp_for_func(f, n=120, seed=2)
     params = _make_params()
     tdtype = torch.double
@@ -106,6 +114,7 @@ def test_max_goal_selects_near_maximum():
         model=model,
         params=params,
         bounds_input=b_in,
+        bounds_model=b_in,
         use_pca_model=False,
         pca=None,
         pc_mins=None,
@@ -124,7 +133,10 @@ def test_max_goal_selects_near_maximum():
 
 def test_target_goal_prefers_means_near_target():
     # Linear objective: f = x1 + x2; prefer target ~1.0
-    f = lambda X: (X[:, 0] + X[:, 1])
+
+    def f(X):
+        return X[:, 0] + X[:, 1]
+
     model, X, y = _build_gp_for_func(f, n=140, seed=3)
     params = _make_params()
     tdtype = torch.double
@@ -137,6 +149,7 @@ def test_target_goal_prefers_means_near_target():
         model=model,
         params=params,
         bounds_input=b_in,
+        bounds_model=b_in,
         use_pca_model=False,
         pca=None,
         pc_mins=None,
@@ -155,7 +168,10 @@ def test_target_goal_prefers_means_near_target():
 
 def test_within_range_prefers_inside_band():
     # Linear objective: f = x1 + x2; prefer [0.8, 1.2]
-    f = lambda X: (X[:, 0] + X[:, 1])
+
+    def f(X):
+        return X[:, 0] + X[:, 1]
+
     model, X, y = _build_gp_for_func(f, n=120, seed=4)
     params = _make_params()
     tdtype = torch.double
@@ -167,6 +183,7 @@ def test_within_range_prefers_inside_band():
         model=model,
         params=params,
         bounds_input=b_in,
+        bounds_model=b_in,
         use_pca_model=False,
         pca=None,
         pc_mins=None,
@@ -185,7 +202,10 @@ def test_within_range_prefers_inside_band():
 
 def test_minimize_below_encourages_below_threshold():
     # Linear objective: f = x1 + x2; encourage being below 0.6
-    f = lambda X: (X[:, 0] + X[:, 1])
+
+    def f(X):
+        return X[:, 0] + X[:, 1]
+
     model, X, y = _build_gp_for_func(f, n=120, seed=5)
     params = _make_params()
     tdtype = torch.double
@@ -198,6 +218,7 @@ def test_minimize_below_encourages_below_threshold():
         model=model,
         params=params,
         bounds_input=b_in,
+        bounds_model=b_in,
         use_pca_model=False,
         pca=None,
         pc_mins=None,
@@ -216,7 +237,10 @@ def test_minimize_below_encourages_below_threshold():
 
 def test_maximize_above_encourages_above_threshold():
     # Linear objective: f = x1 + x2; encourage being above 1.2
-    f = lambda X: (X[:, 0] + X[:, 1])
+
+    def f(X):
+        return X[:, 0] + X[:, 1]
+
     model, X, y = _build_gp_for_func(f, n=120, seed=6)
     params = _make_params()
     tdtype = torch.double
@@ -229,6 +253,7 @@ def test_maximize_above_encourages_above_threshold():
         model=model,
         params=params,
         bounds_input=b_in,
+        bounds_model=b_in,
         use_pca_model=False,
         pca=None,
         pc_mins=None,
@@ -243,5 +268,3 @@ def test_maximize_above_encourages_above_threshold():
     x_best = cand[0].detach().cpu().numpy()
     mu = _posterior_mean(model, x_best)
     assert mu >= 1.0
-
-

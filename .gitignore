@@ -54,6 +54,9 @@ logs/
 # Local TLS certs (never commit private keys)
 certs/
 
+# Local development notes (not committed)
+local-dev-docs/
+
 # Example outputs
 examples/responses/
 

@@ -12,11 +12,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
-import torch
 import pytest
+import torch
 
-from sator_os_engine.core.optimizer.gp import build_models, bounds_input, bounds_model_pca
 from sator_os_engine.core.optimizer.acquisition import select_candidates_multiobjective
+from sator_os_engine.core.optimizer.gp import bounds_input, bounds_model_pca, build_models
 
 
 def _build_two_obj_model(d=2, n=60, seed=0):
@@ -62,6 +62,7 @@ def test_qehvi_input_space_constraints_passed(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr("sator_os_engine.core.optimizer.acquisition.optimize_acqf", fake_optimize_acqf)
 
+    tX = torch.tensor(X, dtype=tdtype, device=tdevice)
     out = select_candidates_multiobjective(
         model=model,
         params=params,
@@ -78,6 +79,7 @@ def test_qehvi_input_space_constraints_passed(monkeypatch: pytest.MonkeyPatch):
         req=req,
         goals=goals,
         Y_np=Y,
+        train_X=tX,
     )
     assert out.shape == (3, 2)
     assert captured.get("inequality_constraints") is not None
@@ -114,6 +116,7 @@ def test_qehvi_pca_constraints_suppressed(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr("sator_os_engine.core.optimizer.acquisition.optimize_acqf", fake_optimize_acqf)
 
+    tX = torch.tensor(X, dtype=tdtype, device=tdevice)
     out = select_candidates_multiobjective(
         model=model,
         params=params,
@@ -130,6 +133,7 @@ def test_qehvi_pca_constraints_suppressed(monkeypatch: pytest.MonkeyPatch):
         req=req,
         goals=goals,
         Y_np=Y,
+        train_X=tX,
     )
     assert out.shape == (3, 2)
     # Constraints suppressed in PCA-modeled path
@@ -157,6 +161,7 @@ def test_advanced_goals_sampling_path(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr("sator_os_engine.core.optimizer.acquisition.optimize_acqf", raise_if_called)
 
+    tX = torch.tensor(X, dtype=tdtype, device=tdevice)
     out = select_candidates_multiobjective(
         model=model,
         params=params,
@@ -173,7 +178,6 @@ def test_advanced_goals_sampling_path(monkeypatch: pytest.MonkeyPatch):
         req=req,
         goals=goals,
         Y_np=Y,
+        train_X=tX,
     )
     assert out.shape == (3, 2)
-
-

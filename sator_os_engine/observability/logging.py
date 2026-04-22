@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import structlog
 
 
-def setup_logging(level: str = "info", fmt: str = "human", to_file: bool = False, file_path: Optional[str] = None) -> None:
+def setup_logging(level: str = "info", fmt: str = "human", to_file: bool = False, file_path: str | None = None) -> None:
     log_level = getattr(logging, level.upper(), logging.INFO)
 
     processors = [
@@ -35,5 +34,3 @@ def setup_logging(level: str = "info", fmt: str = "human", to_file: bool = False
         handlers.append(file_handler)
 
     logging.basicConfig(level=log_level, handlers=handlers)
-
-

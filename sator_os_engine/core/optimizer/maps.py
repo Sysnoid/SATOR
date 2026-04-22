@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 import numpy as np
 import torch
@@ -11,7 +11,7 @@ def compute_gp_maps(
     model,
     cfg,
     req,
-    params: List[Dict[str, Any]],
+    params: list[dict[str, Any]],
     use_pca_model: bool,
     pca,
     Z,
@@ -21,14 +21,12 @@ def compute_gp_maps(
     signs,
     pc_mins=None,
     pc_range=None,
-) -> Dict[str, Any] | None:
+) -> dict[str, Any] | None:
     """Compute GP posterior mean/variance maps either in PCA or input space.
 
     Returns a gp_maps dict or None if maps are not applicable.
     Raises RuntimeError on unexpected errors (caller decides policy).
     """
-    from sklearn.decomposition import PCA
-
     # Determine mapping dimension and axes
     cont_idx = [i for i, p in enumerate(params) if p.get("type", "float") in ("float", "int")]
     ndim_input = len(cont_idx)
@@ -55,10 +53,10 @@ def compute_gp_maps(
         if map_dim == 1:
             Zgrid = axes[0].reshape(-1, 1)
         elif map_dim == 2:
-            ZZ0, ZZ1 = np.meshgrid(axes[0], axes[1], indexing="xy")
+            ZZ0, ZZ1 = np.meshgrid(axes[0], axes[1], indexing="ij")
             Zgrid = np.stack([ZZ0.ravel(), ZZ1.ravel()], axis=1)
         else:
-            ZZ0, ZZ1, ZZ2 = np.meshgrid(axes[0], axes[1], axes[2], indexing="xy")
+            ZZ0, ZZ1, ZZ2 = np.meshgrid(axes[0], axes[1], axes[2], indexing="ij")
             Zgrid = np.stack([ZZ0.ravel(), ZZ1.ravel(), ZZ2.ravel()], axis=1)
         # Model is trained on normalized PCA coordinates (Z in [0,1])
         tXgrid_model = torch.tensor(Zgrid, dtype=tdtype, device=tdevice)
@@ -71,10 +69,10 @@ def compute_gp_maps(
         if map_dim == 1:
             grid_pts = axes[0].reshape(-1, 1)
         elif map_dim == 2:
-            A0, A1 = np.meshgrid(axes[0], axes[1], indexing="xy")
+            A0, A1 = np.meshgrid(axes[0], axes[1], indexing="ij")
             grid_pts = np.stack([A0.ravel(), A1.ravel()], axis=1)
         else:
-            A0, A1, A2 = np.meshgrid(axes[0], axes[1], axes[2], indexing="xy")
+            A0, A1, A2 = np.meshgrid(axes[0], axes[1], axes[2], indexing="ij")
             grid_pts = np.stack([A0.ravel(), A1.ravel(), A2.ravel()], axis=1)
         mid = [(float(p["min"]) + float(p["max"])) / 2.0 for p in params]
         Xgrid = np.tile(np.array(mid, dtype=float), (grid_pts.shape[0], 1))
@@ -83,8 +81,8 @@ def compute_gp_maps(
         tXgrid = torch.tensor(Xgrid, dtype=tdtype, device=tdevice)
 
     # Evaluate posterior means/vars
-    maps_means: Dict[str, Any] = {}
-    maps_vars: Dict[str, Any] = {}
+    maps_means: dict[str, Any] = {}
+    maps_vars: dict[str, Any] = {}
     num_pts = (tXgrid_model if cfg.map_space == "pca" else tXgrid).shape[0]
     means_all = []
     vars_all = []
@@ -93,10 +91,7 @@ def compute_gp_maps(
         mus = []
         vs = []
         for s in range(0, num_pts, bs):
-            if cfg.map_space == "pca":
-                post = m.posterior(tXgrid_model[s : s + bs])
-            else:
-                post = m.posterior(tXgrid[s : s + bs])
+            post = m.posterior(tXgrid_model[s : s + bs]) if cfg.map_space == "pca" else m.posterior(tXgrid[s : s + bs])
             mu_t = post.mean.detach().cpu().numpy().ravel()
             mus.append(mu_t)
             var = post.variance.detach().cpu().numpy().ravel()
@@ -106,8 +101,9 @@ def compute_gp_maps(
         means_all.append(mu_all)
         vars_all.append(var_all)
 
-    shape = tuple(res[:map_dim][::-1])
-    for idx, key in enumerate([k for k in req.objectives.keys()]):
+    # ``ij`` meshgrid + C-order ravel matches reshape to (res[0], res[1], ...).
+    shape = tuple(res[d] for d in range(map_dim))
+    for idx, key in enumerate(req.objectives):
         maps_means[key] = means_all[idx].reshape(shape).tolist()
         maps_vars[key] = vars_all[idx].reshape(shape).tolist()
 
@@ -117,5 +113,3 @@ def compute_gp_maps(
         "grid": {"axes": [ax.tolist() for ax in axes], "resolution": res},
         "maps": {"means": maps_means, "variances": maps_vars},
     }
-
-

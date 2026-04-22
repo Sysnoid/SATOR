@@ -13,20 +13,23 @@ visualization flow, not to assess numerical optimality.
 
 from __future__ import annotations
 
-import os
 import math
+import os
+
 import numpy as np
 import pytest
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # type: ignore
+
     _HAS_MPL = True
 except Exception:
     _HAS_MPL = False
 
-from sator_os_engine.core.models.optimize import OptimizeRequest, OptimizationConfig
+from sator_os_engine.core.models.optimize import OptimizationConfig, OptimizeRequest
 from sator_os_engine.core.optimizer.mobo_engine import run_optimization
 
 
@@ -35,12 +38,12 @@ def _branin(x: np.ndarray) -> np.ndarray:
     x1 = x[..., 0]
     x2 = x[..., 1]
     a = 1.0
-    b = 5.1 / (4.0 * math.pi ** 2)
+    b = 5.1 / (4.0 * math.pi**2)
     c = 5.0 / math.pi
     r = 6.0
     s = 10.0
     t = 1.0 / (8.0 * math.pi)
-    return (a * (x2 - b * x1 ** 2 + c * x1 - r) ** 2 + s * (1 - t) * np.cos(x1) + s).astype(float)
+    return (a * (x2 - b * x1**2 + c * x1 - r) ** 2 + s * (1 - t) * np.cos(x1) + s).astype(float)
 
 
 @pytest.mark.skipif(not _HAS_MPL, reason="matplotlib not installed")
@@ -103,5 +106,3 @@ def test_visualize_branin_predictions(tmp_path):
 
     assert os.path.exists(out_path)
     assert os.path.getsize(out_path) > 1000
-
-

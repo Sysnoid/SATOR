@@ -1,3 +1,4 @@
+# Aligned with pyproject + CUDA PyTorch; keep torch/cu* line in sync with Dockerfile.cuda
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.6.0
@@ -7,10 +8,10 @@ prometheus-client>=0.20.0
 httpx>=0.27.0
 numpy>=1.26.0
 scipy>=1.11.0
-# Install torch with CUDA build matching your system; e.g.:
-torch==2.2.0+cu118 --index-url https://download.pytorch.org/whl/cu118
+# PyTorch CUDA wheels (version must match the +cu* suffix). See https://pytorch.org/get-started/locally/
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
 botorch>=0.10.0
 gpytorch>=1.11.0
 scikit-learn>=1.3.0
-nats-py>=2.5.0
 

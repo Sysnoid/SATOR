@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from sator_os_engine.core.optimizer.gp import build_models, bounds_input, bounds_model_pca
+from sator_os_engine.core.optimizer.gp import bounds_input, bounds_model_pca, build_models
 
 
 def test_bounds_input_tensor_values():
@@ -47,8 +47,8 @@ def test_build_models_and_posterior_shapes():
     # Small synthetic dataset: 2D inputs, 2 objectives
     X = torch.linspace(-1.0, 1.0, 24).reshape(12, 2).to(dtype=torch.double)
     # Objectives: simple quadratic bowls with small noise
-    y1 = (X[:, 0] ** 2 + 0.1 * torch.randn(12, dtype=torch.double))
-    y2 = ((X[:, 1] - 0.5) ** 2 + 0.1 * torch.randn(12, dtype=torch.double))
+    y1 = X[:, 0] ** 2 + 0.1 * torch.randn(12, dtype=torch.double)
+    y2 = (X[:, 1] - 0.5) ** 2 + 0.1 * torch.randn(12, dtype=torch.double)
     Y = torch.stack([y1, y2], dim=1)  # (12, 2)
 
     cfg = SimpleNamespace(gp_config={"lengthscale": 0.5, "outputscale": 1.2, "noise": 1e-4})
@@ -65,5 +65,3 @@ def test_build_models_and_posterior_shapes():
         var = post.variance
         assert mu.shape == (2, 1)
         assert var.shape == (2, 1)
-
-

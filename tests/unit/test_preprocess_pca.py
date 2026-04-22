@@ -55,5 +55,3 @@ def test_roundtrip_input_to_z_norm_and_back():
     X_rec = z_norm_to_input(pca, pc_mins, pc_range, z)
     # Round-trip should be very close
     assert np.allclose(X_rec, X, atol=1e-6)
-
-

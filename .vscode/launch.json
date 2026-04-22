@@ -11,15 +11,6 @@
             "envFile": "${workspaceFolder}/.env"
         },
         {
-            "name": "SATOR: Run NATS Worker",
-            "type": "python",
-            "request": "launch",
-            "module": "sator_os_engine.transports.nats",
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
             "name": "SATOR: Visualize Branin",
             "type": "python",
             "request": "launch",

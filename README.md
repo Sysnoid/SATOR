@@ -12,76 +12,112 @@
   <img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
 </p>
 
-SATOR is an open-source, stateless optimization engine for black-box, multi-objective problems. It focuses on practical defaults, clear APIs, and production-friendly behavior without external dependencies.
+SATOR is an open-source, **stateless multi-objective Bayesian optimization
+server** with a simple HTTP API. It ships with sensible defaults, no database,
+no UI, and no message broker — just a single process you can run locally or
+in Docker on CPU or NVIDIA GPU.
 
-SATOR was originally built for chemical formulations and material compositions, and generalizes to any optimization problem in continuous spaces. It supports two input classes: (1) compositional “ingredients” that must sum to one (typical for mixtures), and (2) free parameters normalized independently. This lets you combine mixtures and standard continuous variables in a single problem, making SATOR suitable for a wide range of numerical optimization tasks—from industrial process tuning to optimizing parameters for algorithmic trading.
+SATOR was originally built for **chemical formulations** and **material
+compositions**, but it generalizes to any continuous-parameter black-box
+optimization problem. It supports two input classes simultaneously:
 
-## Table of contents
-- What it is
-- What the system can currently do
-- Use cases
-- Run it
-- Configuration
-- Try an optimization
-- Documentation
-- Stewardship & Governance
-- License
+1. **Compositional “ingredients”** that must sum to a target (mixtures).
+2. **Free parameters** normalized independently.
 
-## What it is
-- Multi-objective Bayesian optimization server with HTTP API
-- Deterministic, async-capable execution with concurrency controls
-- Optional PCA encoding with GP maps:
-  - 1D → curve map
-  - 2D → surface map
-  - 3D → volumetric map
-  - 4D+ → no plot
-- High-precision SLSQP reconstruction back to the original variables (sum-to-one respected)
-- No database, no UI – simple to deploy and operate
+This makes SATOR suitable for industrial formulation work, process tuning,
+hyperparameter search, or any domain where sample-efficient optimization
+matters.
 
-What the system can currently do
-- Suggest next experiments for single or multiple objectives (qEHVI/qNEHVI, ParEGO, qEI/qPI/qUCB)
-- Handle objective goals: min, max, target, explore/probe, improve, and threshold/range types
-  - minimize_below, maximize_above, maximize_below, minimize_above, within_range
-- Apply constraints: bounds, sum-to-one, ratios
-- Fit GP models in input or PCA space and return visualization-ready GP maps (PCA 1D/2D/3D)
-- Automatically reconstruct PCA-space predictions back to original variables (sum-to-one respected)
+## What you get
 
-## Use cases
-- Chemical formulation and material composition optimization (mixtures with sum‑to‑one constraints)
-- Process tuning with mixed continuous parameters
-- Hyperparameter/parameter search for algorithmic trading strategies
-- Any black‑box optimization in continuous domains where sample efficiency matters
+- Multi-objective Bayesian optimization via [BoTorch](https://botorch.org/)
+  (`qnehvi`, `qehvi`, `qnoisyehvi`, `parego`) and matching single-objective
+  variants (`qei`, `qpi`, `qucb`).
+- Advanced goal types: `target`, `within_range`, `minimize_below`,
+  `maximize_above`, `maximize_below`, `minimize_above`, `explore`, `improve`.
+- Sum-to-one and ratio constraints as first-class inputs.
+- Optional PCA encoding with automatic SLSQP reconstruction back to
+  original variables.
+- GP posterior maps (1-D / 2-D / 3-D) for visualization.
+- Production essentials: API-key auth, rate limiting, IP allow/deny lists,
+  idempotency, health, and Prometheus metrics.
 
-## A quick look
+## Quick look
+
 ![Branin 3D surface — short BO run (minimize)](tests/artifacts/visual_branin_3d.png)
 
-Run it (easiest way)
-- Press F5 in VS Code/Cursor and choose “SATOR: Run Server” (we ship a ready-to-use `.vscode/launch.json`)
-- Or in a terminal: `sator-server` (with the venv activated)
+## Run it
 
-Configuration
-- Set a single API key in `.env`:
-  - `SATOR_API_KEY=dev-key`
-- Health checks: `/livez`, `/readyz` on `http://localhost:8080`
+Easiest:
 
-Try an optimization
+- Press `F5` in VS Code or Cursor and pick *“SATOR: Run Server”* — a
+  `.vscode/launch.json` is shipped.
+- Or, from a shell (virtualenv active):
+
+  ```bash
+  sator-server
+  ```
+
+Configure a single API key in `.env`:
+
+```dotenv
+SATOR_API_KEY=dev-key
+```
+
+Health probes on `http://localhost:8080`: `/livez`, `/readyz`.
+
+Full installation options (CPU, GPU, Docker) are covered in
+[§3 Installation](docs/03-installation.md).
+
+## Try an optimization
+
 ```bash
-curl -s -H "x-api-key: dev-key" -H "Content-Type: application/json" \
-  -d '{"dataset":{},"search_space":{"parameters":[{"name":"x1","type":"float","min":0,"max":1}]},"objectives":{"o1":{"goal":"min"}},"optimization_config":{"acquisition":"qnehvi","batch_size":2,"max_evaluations":10}}' \
+curl -s \
+  -H "x-api-key: dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset": { "X": [[0.1],[0.9]], "Y": [[0.5],[0.2]] },
+    "search_space": { "parameters": [ { "name": "x1", "type": "float", "min": 0, "max": 1 } ] },
+    "objectives": { "o1": { "goal": "min" } },
+    "optimization_config": { "acquisition": "qei", "batch_size": 2, "max_evaluations": 10 }
+  }' \
   http://localhost:8080/v1/optimize
 ```
 
-Documentation
-- See `docs/` for quickstart, API reference, objectives, advanced numerical settings, and operations.
-- Release notes live in `CHANGELOG.md`. Known issues live in `docs/known_bugs.md`.
+Then poll `/v1/jobs/<job_id>/result` for the result.
 
-Stewardship & Governance
-- This project is created and maintained by Sysnoid Technologies Oy. We welcome
-  contributions from the community via pull requests. By contributing, you agree
-  that your changes are licensed under Apache‑2.0, the same license as this repository.
-- See `CONTRIBUTING.md` for guidelines and `SECURITY.md` for vulnerability reporting.
-- Attribution: Contributors will be credited in the git history and release notes.
+## Documentation
 
-License
-- Apache-2.0 (see `LICENSE`).
-  - License text: [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt)
+The full, numbered documentation lives in [`docs/`](docs/README.md):
+
+| § | Topic |
+|---|---|
+| 1 | [Overview](docs/01-overview.md) |
+| 2 | [Quickstart](docs/02-quickstart.md) |
+| 3 | [Installation](docs/03-installation.md) *(local + Docker, CPU + GPU)* |
+| 4 | [Configuration](docs/04-configuration.md) *(environment-variable reference)* |
+| 5 | [API Reference](docs/05-api-reference.md) — also [`openapi.yaml`](docs/openapi.yaml) |
+| 6 | [Objectives & Constraints](docs/06-objectives-and-constraints.md) |
+| 7 | [Optimization Pipeline](docs/07-optimization-pipeline.md) |
+| 8 | [Advanced Tuning](docs/08-advanced-tuning.md) |
+| 9 | [Reconstruction](docs/09-reconstruction.md) |
+| 10 | [Operations](docs/10-operations.md) |
+| 11 | [Local HTTPS Setup](docs/11-local-https-setup.md) |
+| 12 | [Troubleshooting](docs/12-troubleshooting.md) |
+
+Release notes live in [`CHANGELOG.md`](CHANGELOG.md).
+
+## Stewardship & governance
+
+This project is created and maintained by **Sysnoid Technologies Oy**. We
+welcome community pull requests. By contributing, you agree that your
+changes are licensed under Apache-2.0, the same license as this repository.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for guidelines and
+[`SECURITY.md`](SECURITY.md) for vulnerability reporting. Contributors are
+credited in the git history and release notes.
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE) — full text:
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt).
