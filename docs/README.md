@@ -38,6 +38,9 @@ or NVIDIA GPU.
 11. [Local HTTPS setup](11-local-https-setup.md) — generating trusted dev certificates with `mkcert`
 12. [Troubleshooting](12-troubleshooting.md) — known limitations and common errors
 
+### Examples
+13. [Examples](13-examples.md) — runnable demos, audit-style walkthroughs with real figures (PCA pharma tablet, non-PCA cosmetic emulsion, and simpler single-feature demos)
+
 ---
 
 ## Reading paths
@@ -46,6 +49,7 @@ or NVIDIA GPU.
 |---|---|
 | Understand what SATOR does | [01 Overview](01-overview.md) |
 | Try it as fast as possible | [02 Quickstart](02-quickstart.md) |
+| See runnable end-to-end demos | [13 Examples](13-examples.md) |
 | Install with GPU support | [03 Installation](03-installation.md) § GPU |
 | Design an optimization request | [05 API reference](05-api-reference.md) + [06 Objectives & constraints](06-objectives-and-constraints.md) |
 | Tune solver performance | [08 Advanced tuning](08-advanced-tuning.md) |

@@ -103,20 +103,30 @@ When the job is `SUCCEEDED`, the response contains a list of **predictions**
 
 ## 2.6 Run a worked example
 
-The repository ships two end-to-end examples that talk to a running server
-and produce plots:
+The repository ships ten runnable demos under `examples/`. The two
+**flagship** demos each print a self-verifying, stage-by-stage audit of
+the optimizer and save real figures under `examples/responses/`:
 
 ```bash
-python .\examples\http_visualize_branin.py
-python .\examples\http_chem_pca_optimize_visualize.py
+python .\examples\demo_09_pharma_tablet_pca.py
+python .\examples\demo_10_cosmetic_emulsion.py
 ```
 
-The first draws a 3-D surface of the two-input Branin function; the second
-runs an optimization in PCA(2) space, overlays training points (blue) with
-predictions (red), and saves the figures under `examples/responses/`.
+- `demo_09` drives the full PCA pipeline — `ScaledPCA` encoding, GP in
+  PCA space, `qei` acquisition, and SLSQP reconstruction back to the
+  ingredient + process space under sum-to-one, bounds, and a
+  `MCC/lactose` ratio window.
+- `demo_10` drives the non-PCA path on a 10-ingredient cosmetic O/W
+  emulsion with sum-to-one, per-variable bounds, and a
+  `cetearyl / PEG` ratio window.
+
+See [§13 Examples](13-examples.md) for the full catalogue, the
+embedded figures, and an explanation of every stage of the audit
+output.
 
 ## 2.7 Next steps
 
 - [§5 API reference](05-api-reference.md) — full request and response schemas.
 - [§6 Objectives & constraints](06-objectives-and-constraints.md) — goal types beyond `min`/`max`.
+- [§13 Examples](13-examples.md) — audit-style walkthroughs with real figures.
 - [§3 Installation](03-installation.md) — GPU installs and Docker.

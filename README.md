@@ -104,6 +104,7 @@ The full, numbered documentation lives in [`docs/`](docs/README.md):
 | 10 | [Operations](docs/10-operations.md) |
 | 11 | [Local HTTPS Setup](docs/11-local-https-setup.md) |
 | 12 | [Troubleshooting](docs/12-troubleshooting.md) |
+| 13 | [Examples](docs/13-examples.md) *(audit-style demos with embedded figures)* |
 
 Release notes live in [`CHANGELOG.md`](CHANGELOG.md).
 

@@ -1,112 +1,65 @@
-# How to run examples
+# How to run the examples
 
-## 1) Start the server (manually, in a separate terminal)
-- Windows PowerShell:
+This file is the short "setup and run" recipe that lives next to the
+demo scripts. For the full, illustrated walkthrough of what each demo
+does and the expected figures, see
+[`docs/13-examples.md`](../docs/13-examples.md).
+
+---
+
+## 1. Start the server (in a separate terminal)
+
+- Windows PowerShell
   - `./venv/Scripts/Activate.ps1`
   - `$env:SATOR_API_KEY = "dev-key"`
   - `python -m sator_os_engine.server.main`
-- If your server runs elsewhere, set `SATOR_BASE_URL` accordingly (default is `http://localhost:8080`).
+- Linux / macOS
+  - `source ./venv/bin/activate`
+  - `export SATOR_API_KEY=dev-key`
+  - `python -m sator_os_engine.server.main`
 
-### HTTPS (TLS) option
-- For Excel add-ins or environments that require HTTPS:
-  - Ensure local dev certs exist (see [`docs/11-local-https-setup.md`](../docs/11-local-https-setup.md)) under `certs/` (e.g., `certs/localhost.pem`, `certs/localhost-key.pem`). After installing `mkcert`, restart PowerShell before using it.
-  - In `.env`, set `SATOR_ENABLE_TLS=true` and choose a port, conventionally `SATOR_HTTP_PORT=8443`. Keep only one `SATOR_HTTP_PORT` entry.
-  - Start the server as usual (`sator-server` or `python -m sator_os_engine.server.main`); it will bind HTTPS.
-  - Set the client base URL to HTTPS: `$env:SATOR_BASE_URL = "https://localhost:8443"`.
-  - Port conventions: use 8080 for HTTP (TLS disabled), 8443 for HTTPS (TLS enabled).
+If the server runs elsewhere, set `SATOR_BASE_URL` (default is
+`http://localhost:8080`). For the HTTPS option see
+[`docs/11-local-https-setup.md`](../docs/11-local-https-setup.md) and
+[`docs/10-operations.md`](../docs/10-operations.md).
 
-## 2) Install plotting deps (first time only)
-- `pip install matplotlib scikit-learn httpx`
-
-## 3) Run the examples
-
-The examples share a tiny helper (`examples/_common.py`) that submits the
-request, polls the job, and saves both the request and result JSON under
-`examples/responses/`. Because the helper sits next to the demos, always run
-them from the repo root so Python can resolve `import _common`:
+## 2. Install plotting dependencies (first time only)
 
 ```powershell
-python .\examples\demo_01_rosenbrock_single_min.py
+pip install matplotlib scikit-learn httpx
 ```
 
-### Curated demo set (run in any order)
+## 3. Run a demo
 
-| # | File | Demonstrates |
-|---|---|---|
-| 01 | `demo_01_rosenbrock_single_min.py` | Single-objective `min` on the Rosenbrock banana (qEI). |
-| 02 | `demo_02_ackley_target.py`         | `target` goal on Ackley — hit a specific f-value. |
-| 03 | `demo_03_himmelblau_within_range.py` | `within_range` goal on Himmelblau. |
-| 04 | `demo_04_zdt1_pareto.py`           | Multi-objective Pareto front (qNEHVI) vs. analytic ZDT1 front. |
-| 05 | `demo_05_mixture_sum_constraint.py`| 3-ingredient mixture with sum-to-one. |
-| 06 | `demo_06_ratio_constraints.py`     | Ratio constraint 0.5 ≤ A/B ≤ 2.0. |
-| 07 | `demo_07_paint_formulation.py`     | Realistic paint blend — `min`/`max`/`within_range` + sum-to-one. |
-| 08 | `demo_08_ev_electrolyte_target.py` | EV electrolyte — `target` + `within_range` + `maximize_above` + sum-to-one. |
+The examples share a tiny helper (`examples/_common.py`) that submits
+the request, polls the job, and saves both the request and result
+JSON under `examples/responses/`. Because the helper sits next to the
+demos, run them from the repo root so Python can resolve
+`import _common`:
 
-### Legacy examples (kept for continuity)
+```powershell
+python .\examples\demo_09_pharma_tablet_pca.py
+```
 
-- `http_visualize_branin.py` — Branin 3D surface with suggested minimum overlay.
-- `http_chem_pca_optimize_visualize.py` — 14-D chemical formulation, PCA(2) maps, reconstruction.
-- `plot_branin_surface3d.py` — in-process Branin optimization and artifact render.
+Each demo that opens matplotlib windows can be rendered headlessly
+(saving PNGs instead of popping windows) with the smoke wrapper:
 
-## 4) Configuration
+```powershell
+python .\examples\_render_smoke.py demo_09_pharma_tablet_pca
+```
+
+## 4. Configuration
+
 - API key: `SATOR_API_KEY` (defaults to `dev-key`)
-- Server address: `SATOR_BASE_URL` (defaults to `http://localhost:8080`; use `https://localhost:8443` for TLS)
+- Server address: `SATOR_BASE_URL` (defaults to `http://localhost:8080`;
+  use `https://localhost:8443` for TLS)
 
-If you see HTTP 401/403, check the API key. If you see 422, print the server error by temporarily adding `print(r.text)` before raising in the script to view validation details.
+If you see HTTP 401/403, check the API key. If you see 422, print the
+server error by temporarily adding `print(r.text)` before raising in
+the script to view validation details.
 
----
+## 5. What each demo does
 
-## What each example demonstrates
-
-### Chemical PCA example (`examples/http_chem_pca_optimize_visualize.py`)
-- **Dataset**: 20 synthetic formulations with 9 ingredients (sum-to-one) plus 5 other process parameters (pH, temp, viscosity, price, pressure). Two objectives are generated and both are set to **minimize**.
-- **Server workflow exercised**:
-  - Sum-to-one enforcement on training inputs.
-  - Optional PCA (set to PCA(2)) with normalization of PC coordinates to [0, 1].
-  - Per-objective Gaussian Process fitting in the chosen model space (PCA space here).
-  - Multi-objective Bayesian optimization (qEHVI) to propose a batch of candidates balancing both objectives (i.e., move toward the Pareto front).
-  - Automatic reconstruction of PCA-encoded predictions back to the original ingredient + parameter space (respecting sum-to-one and bounds).
-  - Optional GP surface maps returned for visualization when PCA(2) is used.
-
-- **What the plots show**:
-  - Two side-by-side 3D heightmaps in the PCA(2) plane (`PC1`, `PC2`): one surface per objective (**quality_loss**, **cost**). These are the GP posterior mean surfaces learned from your dataset.
-  - **Blue dots** are your training points, encoded into PCA space and plotted exactly on the corresponding GP surface by interpolation.
-  - **Red crosses** are the newly suggested candidates (predictions), also shown exactly on-surface. The same PCA coordinates are evaluated on both surfaces to visualize the trade-off.
-  - The color bars are the GP posterior mean values for each objective at each PCA coordinate.
-
-- **What is being optimized**:
-  - The server minimizes both objectives simultaneously. With qEHVI, it selects a batch of candidates that improve the overall Pareto front under constraints (sum-to-one for ingredients and variable bounds). The returned predictions include:
-    - `encoded`: PCA(2) coordinates of each candidate.
-    - `reconstructed`: the candidate reconstructed back to the original 14-D space (9 ingredients + 5 parameters), enforcing sum-to-one and respecting bounds.
-    - `objectives` and `variances`: GP posterior means and variances for each objective at the candidate.
-
-- **What do `quality_loss` and `cost` mean here? (synthetic demo)**
-  - These are two synthetic objective functions used only for the example to mimic real goals; both are minimized.
-  - `quality_loss` ≈ penalties for being away from target specs, e.g. pH near 7, temperature near 45 °C, higher viscosity, and specific ingredient ratio preferences:
-    - \(0.6\,|pH-7| + 0.001\,(temp-45)^2 + 0.0004\,visc + 2.0\,(w_4-0.15)^2 + 1.5\,(w_2-0.10)^2\)
-  - `cost` ≈ operational/material cost proxy from price, temperature, pressure, and some ingredient fractions:
-    - \(1.8\,price + 0.05\,temp + 0.3\,press + 4.0\,w_6 + 3.0\,w_3\)
-  - In a real project, you replace these with your true measured/derived targets; the server treats them generically.
-
-- **Files saved**:
-  - Full request: `examples/responses/chem_request.json`
-  - Full result: `examples/responses/chem_result.json`
-
-### Branin example (`examples/http_visualize_branin.py`)
-- **Dataset**: Random samples from the well-known Branin function in 2D; single objective to minimize.
-- **Server workflow exercised**:
-  - GP fit in the original input space (no PCA).
-  - Single-objective candidate selection.
-- **What the plot shows**:
-  - A 3D surface of the true Branin function to provide visual context (computed locally for display only).
-  - The training points (white) and the predicted candidates (red X) overlaid on that surface.
-- **Files saved**:
-  - Full request: `examples/responses/branin_request.json`
-  - Full result: `examples/responses/branin_result.json`
-
----
-
-## Notes on interpretation
-- GP surfaces are models learned from your data; they are not the ground truth physics. Peaks/valleys indicate the model’s belief about where the objective is high/low.
-- In multi-objective mode, the same encoded candidate is shown on all objective surfaces. Its z-value differs per surface because each objective has its own GP.
-- Reconstruction ensures suggested formulations are valid in the original space (e.g., ingredients sum exactly to one).
+See [§13 Examples](../docs/13-examples.md) for the full index, the
+two flagship audit demos (`demo_09`, `demo_10`) with embedded
+figures, and a short tour of the simpler demos `demo_01`–`demo_08`.

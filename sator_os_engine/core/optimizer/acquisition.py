@@ -27,6 +27,7 @@ from botorch.utils.sampling import sample_simplex
 from torch.quasirandom import SobolEngine
 
 from .utils import build_linear_constraints as _build_linear_constraints
+from .utils import enforce_ratio_constraints_np as _enforce_ratio_constraints_np
 from .utils import enforce_sum_constraints_np as _enforce_sum_constraints_np
 from .utils import feasible_mask as _feasible_mask
 
@@ -191,18 +192,27 @@ def select_candidates_single_objective(
             z_raw = z_norm * np.asarray(pc_range) + np.asarray(pc_mins)
             x_in = pca.inverse_transform(z_raw)
             x_in = _enforce_sum_constraints_np(x_in, params, req)
+            x_in = _enforce_ratio_constraints_np(x_in, params, req)
+            x_in = _enforce_sum_constraints_np(x_in, params, req)
             z_norm = (pca.transform(x_in) - np.asarray(pc_mins)) / np.asarray(pc_range)
             return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         x_in = _enforce_sum_constraints_np(cand_np, params, req)
+        x_in = _enforce_ratio_constraints_np(x_in, params, req)
+        x_in = _enforce_sum_constraints_np(x_in, params, req)
         return torch.tensor(x_in, dtype=tdtype, device=tdevice)
 
     sob = SobolEngine(dimension=bounds_input.shape[1], scramble=True, seed=rng_seed or 0)
     raw_n = 512
     grid01 = sob.draw(raw_n, dtype=tdtype)
     grid = bounds_input[0] + (bounds_input[1] - bounds_input[0]) * grid01
+    # Sobol samples uniformly over bounds; they will essentially never satisfy
+    # a sum-to-target constraint exactly. Project the grid onto the sum target
+    # first so downstream feasibility checks see realistic candidates rather
+    # than dismissing every sample because of a sum mismatch.
+    grid_input_np = _enforce_sum_constraints_np(grid.detach().cpu().numpy(), params, req)
+    grid = torch.tensor(grid_input_np, dtype=tdtype, device=tdevice)
     if use_pca_model and pca is not None:
-        grid_np = grid.detach().cpu().numpy()
-        z_norm = _input_space_to_z_norm(grid_np, pca, pc_mins, pc_range)
+        z_norm = _input_space_to_z_norm(grid_input_np, pca, pc_mins, pc_range)
         Zgrid = torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         post = model.models[0].posterior(Zgrid)
     else:
@@ -256,10 +266,17 @@ def select_candidates_single_objective(
     # slight variance regularization
     score = score - 0.05 * np.sqrt(var)
 
-    feas = _feasible_mask(grid.detach().cpu().numpy().tolist(), req, params)
-    score = np.where(np.array(feas, dtype=bool), score, -np.inf)
+    grid_for_feas = grid.detach().cpu().numpy()
+    feas_arr = np.array(_feasible_mask(grid_for_feas.tolist(), req, params), dtype=bool)
+    # If sum projection left every sample ratio-infeasible we still have to
+    # return *something*; fall back to ranking on score alone and rely on the
+    # post-hoc ratio-repair below to land in the feasible region.
+    if feas_arr.any():
+        score = np.where(feas_arr, score, -np.inf)
     top_idx = np.argsort(score)[-n:][::-1]
-    cand_input_np = grid.detach().cpu().numpy().copy()[top_idx]
+    cand_input_np = grid_for_feas.copy()[top_idx]
+    cand_input_np = _enforce_sum_constraints_np(cand_input_np, params, req)
+    cand_input_np = _enforce_ratio_constraints_np(cand_input_np, params, req)
     cand_input_np = _enforce_sum_constraints_np(cand_input_np, params, req)
     if use_pca_model and pca is not None:
         z_raw = pca.transform(cand_input_np)
@@ -344,9 +361,13 @@ def select_candidates_multiobjective(
             z_raw = z_norm * pc_range + pc_mins
             x_in = pca.inverse_transform(z_raw)
             x_in = _enforce_sum_constraints_np(x_in, params, req)
+            x_in = _enforce_ratio_constraints_np(x_in, params, req)
+            x_in = _enforce_sum_constraints_np(x_in, params, req)
             z_norm = (pca.transform(x_in) - pc_mins) / pc_range
             return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         x_in = _enforce_sum_constraints_np(cand_np, params, req)
+        x_in = _enforce_ratio_constraints_np(x_in, params, req)
+        x_in = _enforce_sum_constraints_np(x_in, params, req)
         return torch.tensor(x_in, dtype=tdtype, device=tdevice)
 
     # Advanced: sampling + scoring
@@ -354,9 +375,13 @@ def select_candidates_multiobjective(
     raw_n = 1024
     grid01 = sob.draw(raw_n, dtype=tdtype)
     grid = bounds_input[0] + (bounds_input[1] - bounds_input[0]) * grid01
+    # Sobol samples uniformly over bounds and essentially never sum to the
+    # declared mixture target. Project the grid onto the sum target first so
+    # that the feasibility check further down is not a no-op.
+    grid_input_np = _enforce_sum_constraints_np(grid.detach().cpu().numpy(), params, req)
+    grid = torch.tensor(grid_input_np, dtype=tdtype, device=tdevice)
     if use_pca_model and pca is not None:
-        grid_np = grid.detach().cpu().numpy()
-        z_norm = _input_space_to_z_norm(grid_np, pca, pc_mins, pc_range)
+        z_norm = _input_space_to_z_norm(grid_input_np, pca, pc_mins, pc_range)
         Zgrid = torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         posts = [m.posterior(Zgrid) for m in model.models]
     else:
@@ -423,10 +448,14 @@ def select_candidates_multiobjective(
                 score_k = score_k - wi * ((mu - ideal) ** 2)
         score_k = score_k - 0.05 * np.sqrt(var)
         score += score_k
-    feas = _feasible_mask(grid.detach().cpu().numpy().tolist(), req, params)
-    score = np.where(np.array(feas, dtype=bool), score, -np.inf)
+    grid_for_feas = grid.detach().cpu().numpy()
+    feas_arr = np.array(_feasible_mask(grid_for_feas.tolist(), req, params), dtype=bool)
+    if feas_arr.any():
+        score = np.where(feas_arr, score, -np.inf)
     top_idx = np.argsort(score)[-n:][::-1]
-    cand_np = grid.detach().cpu().numpy().copy()[top_idx]
+    cand_np = grid_for_feas.copy()[top_idx]
+    cand_np = _enforce_sum_constraints_np(cand_np, params, req)
+    cand_np = _enforce_ratio_constraints_np(cand_np, params, req)
     cand_np = _enforce_sum_constraints_np(cand_np, params, req)
     if use_pca_model and pca is not None:
         z_raw = pca.transform(cand_np)

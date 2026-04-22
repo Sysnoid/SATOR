@@ -200,6 +200,66 @@ def enforce_sum_constraints_np(cands: np.ndarray, params: list[dict[str, Any]], 
     return X
 
 
+def enforce_ratio_constraints_np(
+    cands: np.ndarray,
+    params: list[dict[str, Any]],
+    req,
+) -> np.ndarray:
+    """Row-wise repair ``x_i / x_j`` to lie inside each declared ratio window.
+
+    For every declared ``ratio_constraints`` entry we snap ``x_i`` to
+    ``clip(x_i, min_ratio * x_j, max_ratio * x_j)`` and then clip to the
+    declared per-parameter bounds. The caller is expected to follow up with
+    :func:`enforce_sum_constraints_np` so that any mass moved by this snap
+    is redistributed back to a valid sum.
+
+    Rows that cannot be repaired (e.g. ``x_j`` is zero or the target ratio
+    window is incompatible with the declared bounds) are left untouched; the
+    feasibility check downstream will surface them honestly instead of us
+    silently fabricating a different recipe.
+    """
+    if cands.size == 0:
+        return cands
+    ratios = (
+        (req.optimization_config.ratio_constraints or [])
+        if hasattr(req.optimization_config, "ratio_constraints")
+        else []
+    )
+    if not ratios:
+        return cands
+    X = np.array(cands, dtype=float, copy=True)
+    dim = X.shape[1]
+    for rc in ratios:
+        try:
+            i = int(rc.get("i", -1))
+            j = int(rc.get("j", -1))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= i < dim and 0 <= j < dim) or i == j:
+            continue
+        mn = rc.get("min_ratio")
+        mx = rc.get("max_ratio")
+        if mn is None and mx is None:
+            continue
+        i_lo = float(params[i].get("min", -np.inf)) if params[i].get("type", "float") in ("float", "int") else -np.inf
+        i_hi = float(params[i].get("max", np.inf)) if params[i].get("type", "float") in ("float", "int") else np.inf
+        xj = X[:, j]
+        # Guard: we can't reason about a ratio when the denominator is zero.
+        safe = xj > 1e-12
+        if not np.any(safe):
+            continue
+        xi = X[:, i].copy()
+        if mn is not None:
+            target_lo = float(mn) * xj
+            xi = np.where(safe, np.maximum(xi, target_lo), xi)
+        if mx is not None:
+            target_hi = float(mx) * xj
+            xi = np.where(safe, np.minimum(xi, target_hi), xi)
+        xi = np.clip(xi, i_lo, i_hi)
+        X[:, i] = xi
+    return X
+
+
 def infer_ingredient_and_param_indices(params: list[dict[str, Any]], req) -> tuple[list[int], list[int]]:
     dim = len(params)
     ing_set = set()

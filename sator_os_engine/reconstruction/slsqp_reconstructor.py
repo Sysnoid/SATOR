@@ -89,11 +89,54 @@ def reconstruct(
         objective, x0, method="SLSQP", bounds=bounds, constraints=constraints, options={"ftol": target_precision}
     )
 
-    final_solution = result.x
+    # SLSQP is known to occasionally report success while the final x drifts
+    # slightly outside the declared bounds when combined with equality +
+    # inequality constraints. Enforce hard constraints post-hoc so callers
+    # never see a "successful" solution that silently violates bounds, sum
+    # or ratio. If the post-processed solution still violates a hard
+    # constraint, we honestly flip ``success`` to False.
+    final_solution = np.clip(result.x, lb, ub)
+    if n_ingredients > 0 and float(sum_target) > 0.0:
+        s = float(np.sum(final_solution[:n_ingredients]))
+        if s > 0:
+            scale = float(sum_target) / s
+            final_solution[:n_ingredients] = np.clip(
+                final_solution[:n_ingredients] * scale, lb[:n_ingredients], ub[:n_ingredients]
+            )
+            s2 = float(np.sum(final_solution[:n_ingredients]))
+            if abs(s2 - float(sum_target)) > 1e-6:
+                diff = float(sum_target) - s2
+                headroom = ub[:n_ingredients] - final_solution[:n_ingredients] if diff > 0 else final_solution[:n_ingredients] - lb[:n_ingredients]
+                headroom_sum = float(np.sum(headroom))
+                if headroom_sum > 1e-12:
+                    final_solution[:n_ingredients] = final_solution[:n_ingredients] + diff * headroom / headroom_sum
+
+    feasible = bool(result.success)
+    if np.any(final_solution < lb - 1e-6) or np.any(final_solution > ub + 1e-6):
+        feasible = False
+    if n_ingredients > 0:
+        s_check = float(np.sum(final_solution[:n_ingredients]))
+        if abs(s_check - float(sum_target)) > 1e-4:
+            feasible = False
+    if ratio_constraints:
+        for rc in ratio_constraints:
+            i = int(rc.get("i", -1))
+            j = int(rc.get("j", -1))
+            if i < 0 or j < 0 or i == j:
+                continue
+            denom = max(float(final_solution[j]), 1e-12)
+            ratio = float(final_solution[i]) / denom
+            mn = rc.get("min_ratio")
+            mx = rc.get("max_ratio")
+            if mn is not None and ratio < float(mn) - 1e-4:
+                feasible = False
+            if mx is not None and ratio > float(mx) + 1e-4:
+                feasible = False
+
     final_error = objective(final_solution)
 
     out: dict[str, Any] = {
-        "success": bool(result.success),
+        "success": feasible,
         "solution": final_solution.tolist(),
         "ingredients": final_solution[:n_ingredients].tolist() if n_ingredients > 0 else [],
         "parameters": final_solution[n_ingredients:].tolist() if n_ingredients < len(final_solution) else [],

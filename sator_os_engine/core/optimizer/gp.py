@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from botorch.fit import fit_gpytorch_mll
 from botorch.models import ModelListGP, SingleTaskGP
+from botorch.models.transforms.input import Normalize
 from botorch.models.transforms.outcome import Standardize
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
@@ -75,10 +76,23 @@ def _freeze_gp_hypers_post_fit(m: SingleTaskGP, cfg_gp: dict[str, Any], tX: torc
 
 
 def build_models(tX: torch.Tensor, tY: torch.Tensor, cfg) -> ModelListGP:
+    # Without an input transform the GP's RBF kernel learns one lengthscale
+    # in the *raw* feature space. When features have wildly different scales
+    # (e.g. mass fractions in [0, 1] and homogenization speed in [2000, 12000])
+    # the kernel collapses onto the dominant dimension and the posterior is
+    # almost flat across the dominated ones. ``Normalize`` applies min/max
+    # normalization from the training bounds inside the model so the kernel
+    # sees unit-scale inputs.
+    d = int(tX.shape[-1])
     models = []
     for i in range(tY.shape[-1]):
         yi = tY[..., i : i + 1]
-        m = SingleTaskGP(tX, yi, outcome_transform=Standardize(m=1))
+        m = SingleTaskGP(
+            tX,
+            yi,
+            input_transform=Normalize(d=d),
+            outcome_transform=Standardize(m=1),
+        )
         try:
             cfg_gp = {}
             if hasattr(cfg, "gp_config") and cfg.gp_config:

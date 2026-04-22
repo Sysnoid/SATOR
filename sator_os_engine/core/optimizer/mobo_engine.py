@@ -10,6 +10,9 @@ from ..models.optimize import OptimizeRequest
 from .device import resolve_torch_device
 from .maps import compute_gp_maps
 from .utils import (
+    enforce_sum_constraints_np as _enforce_sum_constraints_np,
+)
+from .utils import (
     infer_ingredient_and_param_indices as _infer_ingredient_and_param_indices,
 )
 from .utils import (
@@ -147,6 +150,19 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int
                     z_np = z_norm * pc_range + pc_mins
                     x_model = x_input
                     x_params = pca.inverse_transform(z_np)
+                    # The k<d PCA round-trip is lossy and the raw inverse may
+                    # violate sum-to-one / bounds. Project to a feasible point
+                    # so the ``candidate`` field is never a nonsense recipe,
+                    # even if the subsequent SLSQP reconstruction fails.
+                    x_params = _enforce_sum_constraints_np(x_params, params, req)
+                    # enforce_sum_constraints_np only touches ingredients; clip
+                    # the process-parameter columns to their declared bounds so
+                    # ``candidate`` respects every per-variable bound too.
+                    for jj, p in enumerate(params):
+                        lo = p.get("min")
+                        hi = p.get("max")
+                        if lo is not None and hi is not None:
+                            x_params[:, jj] = np.clip(x_params[:, jj], float(lo), float(hi))
                 else:
                     x_model = x_input
                     x_params = x_input.detach().cpu().numpy()
@@ -183,6 +199,32 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int
                             st = sums[0].get("target_sum")
                             if st is not None:
                                 sum_target = float(st)
+                        ratio_cfg = (
+                            (req.optimization_config.ratio_constraints or [])
+                            if hasattr(req.optimization_config, "ratio_constraints")
+                            else []
+                        )
+                        # SLSQP reconstructor expects ratio indices to refer to
+                        # ingredient-subspace positions; remap from full X-space
+                        # indices to positions within ``ing_idx``.
+                        ing_pos = {idx: pos for pos, idx in enumerate(ing_idx)}
+                        ratio_for_reco: list[dict[str, float]] = []
+                        for rc in ratio_cfg:
+                            try:
+                                i_full = int(rc.get("i", -1))
+                                j_full = int(rc.get("j", -1))
+                            except (TypeError, ValueError):
+                                continue
+                            if i_full in ing_pos and j_full in ing_pos:
+                                entry: dict[str, float] = {
+                                    "i": ing_pos[i_full],
+                                    "j": ing_pos[j_full],
+                                }
+                                if rc.get("min_ratio") is not None:
+                                    entry["min_ratio"] = float(rc["min_ratio"])
+                                if rc.get("max_ratio") is not None:
+                                    entry["max_ratio"] = float(rc["max_ratio"])
+                                ratio_for_reco.append(entry)
                         ing_names = [str(params[k]["name"]) for k in ing_idx]
                         par_names = [str(params[k]["name"]) for k in other_idx]
                         rec = slsqp_reconstruct(
@@ -194,7 +236,7 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int
                             n_ingredients=len(ing_idx),
                             target_precision=1e-7,
                             sum_target=sum_target,
-                            ratio_constraints=None,
+                            ratio_constraints=ratio_for_reco or None,
                             ingredient_names=ing_names,
                             parameter_names=par_names,
                         )
@@ -207,6 +249,13 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int
                         }
                         if "solution_by_name" in rec:
                             pred_item["reconstructed"]["by_name"] = rec["solution_by_name"]
+                            # When SLSQP reconstruction succeeds, it returns the single
+                            # feasible recipe that satisfies sum-to-one, bounds, and any
+                            # ratio constraints. Promote it to ``candidate`` so clients
+                            # always see a constraint-compliant formulation there (the
+                            # pre-reconstruction PCA inverse is still in ``encoded``).
+                            if rec.get("success", False):
+                                pred_item["candidate"] = dict(rec["solution_by_name"])
                     except Exception:
                         pass
                 preds.append(pred_item)
@@ -218,12 +267,21 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int
             encoding_info = {"pc_mins": [], "pc_maxs": []} if cfg.use_pca else None
             if use_pca_model and pca is not None:
                 with suppress(Exception):
-                    encoding_info = {
+                    info: dict[str, Any] = {
                         "pc_mins": pc_mins.tolist(),
                         "pc_maxs": pc_maxs.tolist(),
                         "components": pca.components_.tolist(),
                         "mean": pca.mean_.tolist(),
                     }
+                    ev_ratio = getattr(pca, "explained_variance_ratio_", None)
+                    if ev_ratio is not None:
+                        info["explained_variance_ratio"] = np.asarray(ev_ratio).tolist()
+                    scaler_mean = getattr(pca, "scaler_mean_", None)
+                    scaler_scale = getattr(pca, "scaler_scale_", None)
+                    if scaler_mean is not None and scaler_scale is not None:
+                        info["scaler_mean"] = np.asarray(scaler_mean).tolist()
+                        info["scaler_scale"] = np.asarray(scaler_scale).tolist()
+                    encoding_info = info
 
             response: dict[str, Any] = {
                 "predictions": preds,
