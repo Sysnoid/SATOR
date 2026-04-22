@@ -106,7 +106,11 @@ def reconstruct(
             s2 = float(np.sum(final_solution[:n_ingredients]))
             if abs(s2 - float(sum_target)) > 1e-6:
                 diff = float(sum_target) - s2
-                headroom = ub[:n_ingredients] - final_solution[:n_ingredients] if diff > 0 else final_solution[:n_ingredients] - lb[:n_ingredients]
+                headroom = (
+                    ub[:n_ingredients] - final_solution[:n_ingredients]
+                    if diff > 0
+                    else final_solution[:n_ingredients] - lb[:n_ingredients]
+                )
                 headroom_sum = float(np.sum(headroom))
                 if headroom_sum > 1e-12:
                     final_solution[:n_ingredients] = final_solution[:n_ingredients] + diff * headroom / headroom_sum

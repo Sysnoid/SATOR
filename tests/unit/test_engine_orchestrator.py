@@ -170,9 +170,7 @@ def test_orchestrator_nonpca_ratio_advanced_goals_path():
         s = a + b + c
         assert abs(s - 1.0) < 1e-2
         ratio = a / max(b, 1e-12)
-        assert min_r - tol <= ratio <= max_r + tol, (
-            f"ratio {ratio:.4f} violates [{min_r}, {max_r}]"
-        )
+        assert min_r - tol <= ratio <= max_r + tol, f"ratio {ratio:.4f} violates [{min_r}, {max_r}]"
 
 
 def test_orchestrator_pca_ratio_reconstructed():
@@ -220,9 +218,7 @@ def test_orchestrator_pca_ratio_reconstructed():
         mcc = p["candidate"]["mcc"]
         lac = p["candidate"]["lac"]
         ratio = mcc / max(lac, 1e-12)
-        assert min_r - tol <= ratio <= max_r + tol, (
-            f"ratio {ratio:.4f} violates [{min_r}, {max_r}]"
-        )
+        assert min_r - tol <= ratio <= max_r + tol, f"ratio {ratio:.4f} violates [{min_r}, {max_r}]"
         # Sum-to-one should still hold.
         s = sum(p["candidate"][n] for n in ("a", "lac", "mcc", "d"))
         assert abs(s - 1.0) < 1e-2
@@ -275,6 +271,4 @@ def test_orchestrator_botorch_ratio_only_no_sum_no_pca():
         a = p["candidate"]["A"]
         b = p["candidate"]["B"]
         ratio = a / max(b, 1e-12)
-        assert min_r - tol <= ratio <= max_r + tol, (
-            f"ratio {ratio:.4f} violates [{min_r}, {max_r}]"
-        )
+        assert min_r - tol <= ratio <= max_r + tol, f"ratio {ratio:.4f} violates [{min_r}, {max_r}]"
