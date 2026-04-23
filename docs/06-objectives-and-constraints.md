@@ -17,18 +17,31 @@ Every entry in `objectives` must declare a `goal`. The optimizer interprets
 the goal when scoring candidates, either via a BoTorch acquisition function
 (for `min` / `max`) or via Sobol-grid scoring (for all other goals).
 
-| Goal | Meaning | Extra fields |
-|---|---|---|
-| [`min`](#611-min)                       | Minimize `f(x)`. | — |
-| [`max`](#612-max)                       | Maximize `f(x)`. | — |
-| [`target`](#613-target)                 | Drive `f(x)` toward a specific value `T`. | `target_value`, optional `target_tolerance` |
-| [`minimize_below`](#614-minimize_below) | Prefer `f(x) ≤ T`, softly penalize above. | `threshold` |
-| [`maximize_above`](#615-maximize_above) | Prefer `f(x) ≥ T`, softly penalize below. | `threshold` |
-| [`maximize_below`](#616-maximize_below) | Maximize `f(x)` but stay below `T`. | `threshold` |
-| [`minimize_above`](#617-minimize_above) | Minimize `f(x)` but stay above `T`. | `threshold` |
-| [`within_range`](#618-within_range)     | Keep `f(x) ∈ [A, B]`, preferably near `ideal`. | `range` |
-| [`explore`](#619-explore) *(alias `probe`)* | Prefer high-variance regions. | — |
-| [`improve`](#6110-improve)              | Prefer the largest expected improvement over the current best. | — |
+SATOR splits goal types into two families:
+
+- **Soft goals** shape the acquisition score. The optimizer *prefers*
+  candidates that satisfy your intent but does **not** guarantee it.
+- **Hard goals** (the `enforce_*` family) are evaluated against the GP
+  posterior and used as a feasibility mask during candidate selection.
+  Every returned prediction carries an `enforced_goals_satisfied` flag so
+  the caller can tell at a glance whether the threshold held on the
+  surrogate. Read §6.1.11 before using a threshold in production R&D.
+
+| Goal | Family | Meaning | Extra fields |
+|---|---|---|---|
+| [`min`](#611-min)                             | soft | Minimize `f(x)`. | — |
+| [`max`](#612-max)                             | soft | Maximize `f(x)`. | — |
+| [`target`](#613-target)                       | soft | Drive `f(x)` toward a specific value `T`. | `target_value`, optional `target_tolerance` |
+| [`minimize_below`](#614-minimize_below)       | soft | Prefer `f(x) ≤ T`, softly penalize above. | `threshold` |
+| [`maximize_above`](#615-maximize_above)       | soft | Prefer `f(x) ≥ T`, softly penalize below. | `threshold` |
+| [`maximize_below`](#616-maximize_below)       | soft | Maximize `f(x)` but stay below `T`. | `threshold` |
+| [`minimize_above`](#617-minimize_above)       | soft | Minimize `f(x)` but stay above `T`. | `threshold` |
+| [`within_range`](#618-within_range)           | soft | Keep `f(x) ∈ [A, B]`, preferably near `ideal`. | `range` |
+| [`explore`](#619-explore) *(alias `probe`)*   | soft | Prefer high-variance regions. | — |
+| [`improve`](#6110-improve)                    | soft | Prefer the largest expected improvement over the current best. | — |
+| [`enforce_above`](#6111-enforce)              | **hard** | GP posterior **must satisfy** `f(x) ≥ T`. | `threshold_value` |
+| [`enforce_below`](#6111-enforce)              | **hard** | GP posterior **must satisfy** `f(x) ≤ T`. | `threshold_value` |
+| [`enforce_within_range`](#6111-enforce)       | **hard** | GP posterior **must satisfy** `f(x) ∈ [A, B]`. | `range` |
 
 ### 6.1.1 `min`
 
@@ -67,7 +80,11 @@ Optional knobs (set on `optimization_config`):
 
 ### 6.1.4 `minimize_below`
 
-Prefer `f(x) ≤ T`; anything above is softly penalized.
+**Soft.** Prefer `f(x) ≤ T`; anything above is *softly penalized* in the
+acquisition score. The optimizer may still return candidates whose GP mean
+sits above `T` when nothing better is available. Use
+[`enforce_below`](#6111-enforce) if the threshold is a requirement rather
+than a preference.
 
 ```json
 "impurity_ppm": {
@@ -78,7 +95,10 @@ Prefer `f(x) ≤ T`; anything above is softly penalized.
 
 ### 6.1.5 `maximize_above`
 
-Prefer `f(x) ≥ T`; anything below is softly penalized.
+**Soft.** Prefer `f(x) ≥ T`; anything below is *softly penalized*. Same
+caveat as `minimize_below`: this is a preference, not a guarantee. Use
+[`enforce_above`](#6111-enforce) if the threshold must hold on every
+returned candidate.
 
 ```json
 "tensile_strength": {
@@ -134,6 +154,80 @@ to learn the landscape before exploiting it.
 
 Prefer candidates with the **largest expected improvement** over the current
 best. A greedy, exploitation-heavy choice.
+
+### 6.1.11 `enforce_above` / `enforce_below` / `enforce_within_range`
+
+**Hard.** These goal types turn a soft scoring term into a real feasibility
+constraint on the GP posterior. They should be your default whenever a
+threshold represents a *requirement* (safety floor, spec ceiling, in-spec
+band) rather than a preference.
+
+**How they work:**
+
+1. On the Sobol scoring grid, the GP posterior mean `μ` is compared to the
+   configured threshold. Rows that violate the threshold are masked out of
+   the candidate pool before the acquisition score is ranked. If *no* row is
+   feasible the mask is relaxed so a batch can still be returned — the
+   violating candidates are then flagged downstream so the caller can see it.
+2. After selection, every returned prediction carries:
+
+   ```json
+   {
+     "enforced_goals_satisfied": true,
+     "enforced_violations": []
+   }
+   ```
+
+   Violating rows list the offending objectives, e.g.
+   `["stability<4.2", "friability>1"]`.
+3. The top-level `diagnostics.enforcement` block summarises the result:
+
+   ```json
+   "enforcement": {
+     "enabled": true,
+     "uncertainty_margin": 0.0,
+     "n_total": 4,
+     "n_satisfied": 3,
+     "all_infeasible": false,
+     "per_objective_violations": { "stability": 1 },
+     "goals": [
+       { "objective": "stability", "kind": "above", "lo": 4.2, "hi": null }
+     ]
+   }
+   ```
+
+**Schema:**
+
+```json
+"stability":  { "goal": "enforce_above",        "threshold_value": 4.2 },
+"friability": { "goal": "enforce_below",        "threshold_value": 1.0 },
+"hardness":   { "goal": "enforce_within_range", "range": { "min": 80, "max": 150 } }
+```
+
+**Uncertainty margin (optional, safer for R&D):**
+
+By default, enforcement runs on the posterior **mean**. To demand that a
+confidence bound satisfy the threshold instead, set
+
+```json
+"optimization_config": {
+  "enforcement_uncertainty_margin": 2.0
+}
+```
+
+With `margin = k`, `enforce_above` demands `μ − k·σ ≥ T` (the LCB must
+clear the floor), `enforce_below` demands `μ + k·σ ≤ T`, and
+`enforce_within_range` demands both bounds lie inside the window. `k = 2`
+corresponds to roughly 95% confidence; use `0.0` (the default) when the
+training data is already densely sampled near the threshold.
+
+**When to pick soft vs. hard:**
+
+| You want… | Use |
+|---|---|
+| A gentle nudge toward a target band, but candidates outside it are still OK. | `within_range`, `minimize_below`, `maximize_above` (soft). |
+| A hard threshold that the surrogate must satisfy before the candidate even counts. | `enforce_*` (hard). |
+| A hard *input-space* constraint (sum, ratio, bounds). | `sum_constraints` / `ratio_constraints` / parameter bounds — not an objective. |
 
 ---
 
@@ -203,16 +297,20 @@ Either `min_ratio` or `max_ratio` may be omitted if only one side is needed.
 
 ## 6.4 Objectives versus constraints
 
-If a quantity is **hard**, model it as a constraint, not an objective:
+If a quantity is **hard**, model it with the strictest mechanism available:
 
 | Requirement | Model as |
 |---|---|
-| “pH must be in `[6.8, 7.2]`.” | `within_range` objective **or** pre/post filter, depending on how expensive violations are. |
+| “pH must land near 7.0, but within `[6.8, 7.2]` is also fine.” | Soft `within_range` (or `target`) objective. |
+| “pH must end up in `[6.8, 7.2]` on the predicted surface.” | **Hard** `enforce_within_range` objective. |
+| “Impurity must not exceed 50 ppm.” | **Hard** `enforce_below` objective. |
 | “Total moles must equal 1.” | `sum_constraints`, not an objective. |
 | “Ratio of `A` to `B` between `0.5` and `2`.” | `ratio_constraints`, not an objective. |
 
-Objectives are things the optimizer should **trade off**; constraints are
-things it **must not violate**.
+Soft goals are things the optimizer should **trade off**; hard goals
+(`enforce_*`) and input constraints are things it **must not violate** on
+the surrogate. Pick the right one up front — changing your mind half-way
+through a study usually means throwing away samples.
 
 ---
 

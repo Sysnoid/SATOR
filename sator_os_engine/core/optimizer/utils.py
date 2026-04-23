@@ -278,3 +278,143 @@ def infer_ingredient_and_param_indices(params: list[dict[str, Any]], req) -> tup
     ing_idx = sorted(list(ing_set))
     other_idx = [i for i in range(dim) if i not in ing_set]
     return ing_idx, other_idx
+
+
+# ---------------------------------------------------------------------------
+# Hard-constraint goal enforcement
+# ---------------------------------------------------------------------------
+#
+# The "enforce_*" goal family turns a soft scoring term into a **hard
+# feasibility gate** on the GP posterior. Unlike ``minimize_below`` or
+# ``maximize_above`` (which only add a penalty to the acquisition score),
+# ``enforce_below`` / ``enforce_above`` / ``enforce_within_range`` require the
+# GP-predicted mean (or a confidence bound, if an uncertainty margin is
+# configured) to satisfy the threshold or every candidate is flagged as
+# infeasible in the response.
+#
+# Two helpers ship together:
+#   * ``extract_enforced_goal_specs``: normalises the per-objective
+#     configuration into a lightweight list of ``(obj_name, kind, bounds)``
+#     tuples; returns ``[]`` when no enforce_* goal is present so callers
+#     can skip the whole check with a single ``if specs:``.
+#   * ``evaluate_enforced_goals``: given stacked posterior ``mu`` and
+#     ``var`` arrays (one column per objective, in the same order as
+#     ``req.objectives``) and the uncertainty margin, returns a boolean
+#     mask of row-wise feasibility plus a list of per-row violation
+#     labels suitable for the ``diagnostics.enforcement`` block.
+#
+# Goal payload shapes accepted by the parser:
+#   * ``{"goal": "enforce_above", "threshold_value": 4.2}``
+#   * ``{"goal": "enforce_above", "threshold": {"value": 4.2}}``  (back-compat)
+#   * ``{"goal": "enforce_below", "threshold_value": 1.0}``
+#   * ``{"goal": "enforce_within_range",
+#          "range": {"min": 80, "max": 150}}``
+
+
+ENFORCED_GOAL_NAMES: tuple[str, ...] = (
+    "enforce_above",
+    "enforce_below",
+    "enforce_within_range",
+)
+
+
+def extract_enforced_goal_specs(req) -> list[dict[str, Any]]:
+    """Return a normalised list of hard-enforce goal specs.
+
+    Each spec is ``{"index": int, "name": str, "kind": str, "lo": float | None,
+    "hi": float | None}``. ``kind`` is one of ``"above"``, ``"below"``,
+    ``"within_range"``; ``lo`` is the lower threshold (above / within_range),
+    ``hi`` the upper threshold (below / within_range). Returns an empty list
+    if no enforce_* goal is present, so callers can bail cheaply.
+    """
+    if not hasattr(req, "objectives") or not isinstance(req.objectives, dict):
+        return []
+    specs: list[dict[str, Any]] = []
+    for idx, (obj_name, cfg) in enumerate(req.objectives.items()):
+        if not isinstance(cfg, dict):
+            continue
+        goal = str(cfg.get("goal", "")).lower()
+        if goal not in ENFORCED_GOAL_NAMES:
+            continue
+        thr_val = cfg.get("threshold_value")
+        if thr_val is None and isinstance(cfg.get("threshold"), dict):
+            thr_val = cfg["threshold"].get("value")
+        rng = cfg.get("range") if isinstance(cfg.get("range"), dict) else None
+        lo: float | None = None
+        hi: float | None = None
+        if goal == "enforce_above" and thr_val is not None:
+            lo = float(thr_val)
+        elif goal == "enforce_below" and thr_val is not None:
+            hi = float(thr_val)
+        elif goal == "enforce_within_range" and rng is not None:
+            if rng.get("min") is not None:
+                lo = float(rng["min"])
+            if rng.get("max") is not None:
+                hi = float(rng["max"])
+            if lo is not None and hi is not None and lo > hi:
+                lo, hi = hi, lo
+        # Skip specs we can't act on (missing bounds).
+        if lo is None and hi is None:
+            continue
+        specs.append(
+            {
+                "index": idx,
+                "name": str(obj_name),
+                "kind": goal.removeprefix("enforce_"),
+                "lo": lo,
+                "hi": hi,
+            }
+        )
+    return specs
+
+
+def evaluate_enforced_goals(
+    specs: list[dict[str, Any]],
+    mu_matrix: np.ndarray,
+    var_matrix: np.ndarray | None = None,
+    margin: float = 0.0,
+) -> tuple[np.ndarray, list[list[str]]]:
+    """Evaluate every row of ``mu_matrix`` against the enforce_* specs.
+
+    ``mu_matrix`` has shape ``(n_rows, n_objectives)`` where the column
+    order matches ``req.objectives`` (and therefore each spec's ``index``).
+    ``var_matrix`` is the matching variance matrix; only consulted when
+    ``margin > 0``. Returns ``(mask, violations)`` where ``mask`` is shape
+    ``(n_rows,)`` and True means every enforce_* constraint is satisfied,
+    and ``violations[i]`` is a list of ``"<obj_name>:<reason>"`` labels for
+    row ``i`` (empty list when the row is feasible).
+    """
+    n_rows = int(mu_matrix.shape[0]) if mu_matrix.ndim > 1 else mu_matrix.shape[0]
+    mask = np.ones(n_rows, dtype=bool)
+    violations: list[list[str]] = [[] for _ in range(n_rows)]
+    if not specs:
+        return mask, violations
+    m = max(0.0, float(margin))
+    for spec in specs:
+        col = int(spec["index"])
+        mu = np.asarray(mu_matrix[:, col], dtype=float)
+        sigma = (
+            np.sqrt(np.maximum(np.asarray(var_matrix[:, col], dtype=float), 0.0))
+            if (m > 0.0 and var_matrix is not None)
+            else np.zeros_like(mu)
+        )
+        lo = spec["lo"]
+        hi = spec["hi"]
+        name = spec["name"]
+        # For enforce_above / lower edge of a range, the worst case is the
+        # lower confidence bound ``mu - m*sigma`` (we want it above lo).
+        # For enforce_below / upper edge, the worst case is the upper
+        # confidence bound ``mu + m*sigma`` (we want it below hi).
+        if lo is not None:
+            lcb = mu - m * sigma
+            ok_lo = lcb >= lo - 1e-12
+            for i in np.where(~ok_lo)[0]:
+                violations[int(i)].append(f"{name}<{lo:g}")
+            mask &= ok_lo
+        if hi is not None:
+            ucb = mu + m * sigma
+            ok_hi = ucb <= hi + 1e-12
+            for i in np.where(~ok_hi)[0]:
+                violations[int(i)].append(f"{name}>{hi:g}")
+            mask &= ok_hi
+    return mask, violations

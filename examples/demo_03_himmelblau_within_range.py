@@ -17,7 +17,7 @@ LO, HI = 10.0, 25.0
 
 def himmelblau(x: np.ndarray) -> np.ndarray:
     x1, x2 = x[..., 0], x[..., 1]
-    return ((x1 ** 2 + x2 - 11.0) ** 2 + (x1 + x2 ** 2 - 7.0) ** 2).astype(float)
+    return ((x1**2 + x2 - 11.0) ** 2 + (x1 + x2**2 - 7.0) ** 2).astype(float)
 
 
 def main() -> None:
@@ -60,9 +60,20 @@ def main() -> None:
 
     fig = plt.figure(figsize=(8, 6), dpi=120)
     ax = fig.add_subplot(111, projection="3d")
-    surf = ax.plot_surface(gx, gy, gz_plot, cmap="magma", alpha=0.8, linewidth=0)
+    surf = ax.plot_surface(gx, gy, gz_plot, cmap="magma", alpha=0.85, linewidth=0)
     fig.colorbar(surf, shrink=0.7, pad=0.08, label="log(1 + f)")
-    ax.contour(gx, gy, gz, levels=[LO, HI], colors="lime", offset=np.log1p(LO), linewidths=1.5)
+    # Contour the feasibility band on the SAME scale as the surface. Previously
+    # this passed raw ``gz`` (which ranges 0..~890), which tricked matplotlib's
+    # 3D autoscaler into stretching the z-axis to 800 and squashing the log1p
+    # surface into a thin pancake at the bottom.
+    ax.contour(
+        gx,
+        gy,
+        gz_plot,
+        levels=[np.log1p(LO), np.log1p(HI)],
+        colors="lime",
+        linewidths=1.5,
+    )
     ax.scatter(X[:, 0], X[:, 1], np.log1p(himmelblau(X)), c="white", s=12, alpha=0.7, label="train")
     if P.size:
         ax.scatter(P[:, 0], P[:, 1], np.log1p(himmelblau(P)), c="red", s=80, marker="X", label="pred")
@@ -70,6 +81,7 @@ def main() -> None:
     ax.set_xlabel("x1")
     ax.set_ylabel("x2")
     ax.set_zlabel("log(1+f)")
+    ax.set_zlim(0, np.log1p(gz.max()) * 1.02)
     ax.view_init(elev=30, azim=-60)
     ax.legend(loc="upper right")
     plt.tight_layout()

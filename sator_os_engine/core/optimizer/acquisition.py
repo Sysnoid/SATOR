@@ -29,9 +29,42 @@ from torch.quasirandom import SobolEngine
 from .utils import build_linear_constraints as _build_linear_constraints
 from .utils import enforce_ratio_constraints_np as _enforce_ratio_constraints_np
 from .utils import enforce_sum_constraints_np as _enforce_sum_constraints_np
+from .utils import evaluate_enforced_goals as _evaluate_enforced_goals
+from .utils import extract_enforced_goal_specs as _extract_enforced_goal_specs
 from .utils import feasible_mask as _feasible_mask
 
 _log = logging.getLogger("sator")
+
+
+# =============================================================================
+# Soft vs hard threshold goals -- READ BEFORE DEBUGGING "MY THRESHOLD WAS
+# IGNORED"
+# =============================================================================
+# The following goal names are **SOFT**: they only add a shaping term to the
+# acquisition score. They do NOT filter candidates and they do NOT guarantee
+# that returned predictions satisfy the threshold on the GP posterior.
+#
+#   - "minimize_below" / "maximize_above"    (legacy threshold penalties)
+#   - "within_range"                         (soft range penalty + ideal pull)
+#   - "target"                               (distance-to-target penalty)
+#
+# Use them when a threshold is a **preference**, not a requirement.
+#
+# For hard thresholds that MUST hold on the GP posterior, use the
+# "enforce_*" goal family (parsed by utils.extract_enforced_goal_specs and
+# evaluated by utils.evaluate_enforced_goals):
+#
+#   - "enforce_above"         {"goal": "enforce_above", "threshold_value": T}
+#   - "enforce_below"         {"goal": "enforce_below", "threshold_value": T}
+#   - "enforce_within_range"  {"goal": "enforce_within_range",
+#                              "range": {"min": lo, "max": hi}}
+#
+# enforce_* goals apply a hard feasibility mask on the Sobol scoring grid
+# and tag every returned prediction with ``enforced_goals_satisfied`` +
+# ``enforced_violations``. Set ``optimization_config.enforcement_uncertainty_margin``
+# > 0 to require a confidence-bound (LCB/UCB) to satisfy the threshold.
+# See docs/06-objectives-and-constraints.md for the full contract.
+# =============================================================================
 
 
 def _input_space_to_z_norm(
@@ -109,6 +142,55 @@ def _parego_scalarized_objective(
 
 def _single_task_model(model: Any) -> Any:
     return model.models[0] if hasattr(model, "models") else model
+
+
+def _enforcement_mask_from_posteriors(
+    req: Any,
+    mu_list: list[np.ndarray],
+    var_list: list[np.ndarray],
+) -> np.ndarray | None:
+    """Build a boolean feasibility mask from enforce_* goal specs.
+
+    Returns ``None`` when no enforce_* goal is configured (callers should
+    skip the whole check). Otherwise returns shape ``(n_grid,)`` where
+    ``True`` means every enforce_* threshold is satisfied on the GP
+    posterior for that Sobol row. ``mu_list`` / ``var_list`` are ordered
+    to match ``req.objectives``.
+
+    The GPs in ``mobo_engine.run_optimization`` are trained on a
+    sign-flipped ``Y`` (``+1`` for ``max`` goals, ``-1`` for everything
+    else) so that all objectives live in a minimization frame. User
+    thresholds, on the other hand, are always stated in the original
+    ``Y`` units. We therefore flip ``mu`` back to user units before
+    comparing, using the same sign convention as the orchestrator.
+    """
+    specs = _extract_enforced_goal_specs(req)
+    if not specs:
+        return None
+    if not mu_list:
+        return None
+    obj_cfgs = list(req.objectives.values()) if isinstance(req.objectives, dict) else []
+    signs = np.array(
+        [1.0 if str(c.get("goal", "min")).lower() == "max" else -1.0 for c in obj_cfgs],
+        dtype=float,
+    )
+    mu_cols = []
+    for k, m in enumerate(mu_list):
+        col = np.asarray(m, dtype=float).ravel()
+        s = float(signs[k]) if k < signs.size else -1.0
+        mu_cols.append(col * s)
+    mu_mat = np.column_stack(mu_cols)
+    if var_list and len(var_list) == len(mu_list):
+        # Variance is invariant under sign flip (Var[-X] = Var[X]).
+        var_mat = np.column_stack([np.asarray(v, dtype=float).ravel() for v in var_list])
+    else:
+        var_mat = None
+    margin = 0.0
+    cfg = getattr(req, "optimization_config", None)
+    if cfg is not None:
+        margin = float(getattr(cfg, "enforcement_uncertainty_margin", 0.0) or 0.0)
+    mask, _ = _evaluate_enforced_goals(specs, mu_mat, var_mat, margin)
+    return mask
 
 
 def select_candidates_single_objective(
@@ -283,6 +365,16 @@ def select_candidates_single_objective(
     # we back off to input-feasibility alone, then to score-only ranking.
     if use_pca_model and in_envelope is not None:
         combined = feas_arr & in_envelope
+        if combined.any():
+            feas_arr = combined
+    # Hard-enforce goal feasibility on the GP posterior (enforce_above /
+    # enforce_below / enforce_within_range). Single-objective path only
+    # reaches here for non-simple goals, so cfg0 is the relevant objective;
+    # still feed it through the generic helper in case more objectives are
+    # declared (the helper indexes by req.objectives order).
+    enf_mask = _enforcement_mask_from_posteriors(req, [mu], [var])
+    if enf_mask is not None:
+        combined = feas_arr & enf_mask
         if combined.any():
             feas_arr = combined
     if feas_arr.any():
@@ -476,6 +568,12 @@ def select_candidates_multiobjective(
     feas_arr = np.array(_feasible_mask(grid_for_feas.tolist(), req, params), dtype=bool)
     if use_pca_model and in_envelope is not None:
         combined = feas_arr & in_envelope
+        if combined.any():
+            feas_arr = combined
+    # Hard-enforce goal feasibility on the GP posterior across all objectives.
+    enf_mask = _enforcement_mask_from_posteriors(req, mu_list, var_list)
+    if enf_mask is not None:
+        combined = feas_arr & enf_mask
         if combined.any():
             feas_arr = combined
     if feas_arr.any():

@@ -19,6 +19,16 @@ class OptimizationConfig(BaseModel):
     value_normalization: str | None = None  # none|standardize|minmax
     target_tolerance: float | None = None
     target_variance_penalty: float | None = None
+    # Hard-constraint goal enforcement (enforce_above / enforce_below /
+    # enforce_within_range). Feasibility of the GP posterior against the
+    # threshold is evaluated on ``mu`` by default. Setting a positive margin
+    # switches enforcement to a confidence bound: for enforce_above the
+    # lower bound ``mu - margin * sigma`` must satisfy the threshold;
+    # for enforce_below it is ``mu + margin * sigma``; for
+    # enforce_within_range both bounds must lie inside the window.
+    # Typical choices: 0.0 (default, mean only), 1.0 (~1 sigma),
+    # 2.0 (~95% confidence). See docs/06-objectives-and-constraints.md.
+    enforcement_uncertainty_margin: float = 0.0
     sum_constraints: list[dict[str, Any]] | None = None  # [{"indices":[0,1,2],"target_sum":1.0}]
     ratio_constraints: list[dict[str, Any]] | None = None  # [{"i":0,"j":1,"min_ratio":0.5,"max_ratio":2.0}]
     # GP surface/volume maps for visualization (2D/3D only)

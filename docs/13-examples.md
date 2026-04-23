@@ -8,9 +8,11 @@ slug: /examples
 
 The `examples/` directory ships ten runnable Python demos that exercise
 every major feature of SATOR: single- and multi-objective optimization,
-mixed goal types (`min`, `max`, `target`, `within_range`,
-`minimize_below`, `maximize_above`), sum and ratio constraints, PCA
-dimensionality reduction, SLSQP reconstruction, and GP surface maps.
+soft goal types (`min`, `max`, `target`, `within_range`,
+`minimize_below`, `maximize_above`), **hard-enforce goal types**
+(`enforce_above`, `enforce_below`, `enforce_within_range` — see
+§6.1.11), sum and ratio constraints, PCA dimensionality reduction,
+SLSQP reconstruction, and GP surface maps.
 
 Two of them — **demo 09** (pharmaceutical tablet, PCA path) and
 **demo 10** (cosmetic O/W emulsion, non-PCA path) — are
@@ -37,7 +39,7 @@ for the five-minute setup).
 | 05 | [`demo_05_mixture_sum_constraint.py`](../examples/demo_05_mixture_sum_constraint.py) | 3-ingredient mixture, sum-to-one constraint. | `qei` |
 | 06 | [`demo_06_ratio_constraints.py`](../examples/demo_06_ratio_constraints.py) | Ratio constraint `0.5 ≤ A/B ≤ 2.0`. | `qei` |
 | 07 | [`demo_07_paint_formulation.py`](../examples/demo_07_paint_formulation.py) | Paint blend — `min` + `max` + `within_range` + sum-to-one. | `qei` (advanced) |
-| 08 | [`demo_08_ev_electrolyte_target.py`](../examples/demo_08_ev_electrolyte_target.py) | EV electrolyte — `target` + `within_range` + `maximize_above` + sum-to-one. | `qei` (advanced) |
+| 08 | [`demo_08_ev_electrolyte_target.py`](../examples/demo_08_ev_electrolyte_target.py) | EV electrolyte — `target` + `within_range` + **`enforce_above`** safety floor + sum-to-one. PCA pipeline. | `qnehvi` (PCA, advanced) |
 | 09 | [`demo_09_pharma_tablet_pca.py`](../examples/demo_09_pharma_tablet_pca.py) | **PCA flagship.** 7 excipients + 2 process params, 4 mixed goals, sum + ratio, `ScaledPCA(2)` + GP surfaces + SLSQP reconstruction. | `qei` (PCA) |
 | 10 | [`demo_10_cosmetic_emulsion.py`](../examples/demo_10_cosmetic_emulsion.py) | **Non-PCA flagship.** 10 ingredients + 2 process params, 4 mixed goals, sum + ratio. | `qei` (advanced) |
 
@@ -114,13 +116,21 @@ of the four minima — inside the band, not at the bottoms of the bowls
 Pareto front: `f2 = 1 − √f1` on `f1 ∈ [0, 1]`.
 
 **Engine config.** Two objectives, both `min`, `acquisition="qnehvi"`
-(log noisy expected hypervolume improvement), batch size 6. BoTorch
-`qLogNoisyExpectedHypervolumeImprovement` path — no constraints.
+(which maps to `qLogExpectedHypervolumeImprovement` in SATOR's
+multi-objective dispatcher), batch size 4, 96 training points. BoTorch
+log-EHVI path — no constraints.
 
 **What to look for.** Red X markers on or just above the green
 analytic front. Training points (circles) are scattered far from the
-front; the predictions sit on it — a direct demonstration of
+front; most predictions sit exactly on it — a direct demonstration of
 hypervolume-driven Pareto sampling.
+
+Note that one or two batch members may land *off* the front in
+high-uncertainty corners. That is honest BO exploration: qLogEHVI
+rationally hedges against the GP's residual posterior uncertainty in
+unexplored regions. In a real R&D loop the off-front members are
+evaluated, added to the dataset, and the next batch tightens. For a
+single-shot demo this is the expected behavior — not a bug.
 
 ![demo_04 ZDT1 Pareto front](assets/examples/demo_04_zdt1.png)
 
@@ -206,36 +216,86 @@ layout for real mixtures:
 
 ---
 
-## 13.9 Demo 08 — EV electrolyte (target + band + threshold)
+## 13.9 Demo 08 — EV electrolyte (hard stability floor + PCA)
 
 **Goal:** 5 solvent/salt mass fractions (`EC`, `DMC`, `EMC`, `LiPF6`,
-`additive`) plus `temp_C`. Three heterogeneous objectives:
+`additive`) plus `temp_C`. Three heterogeneous objectives that mix
+**soft preferences** with a **hard safety floor**:
 
-- `conductivity` — **target** `T = 10.5 mS/cm` (`target_tolerance = 0.5`)
-- `viscosity` — **within_range** `[2.0, 5.0] cP`, ideal `3.0`
-- `stability` — **maximize_above** floor `4.2 V` (safety)
+- `conductivity` — **soft** `target` `T = 10.5 mS/cm`
+  (`target_tolerance = 0.5`)
+- `viscosity` — **soft** `within_range` `[2.0, 5.0] cP`, ideal `3.0`
+- `stability` — **hard** `enforce_above` floor `4.2 V` (safety
+  requirement — a soft `maximize_above` is not acceptable here)
 
-**Engine config.** Three goal types in one run — the most
-goal-varied of the mid-size demos. All three go through the advanced
-Sobol-scoring path because none are simple `min`/`max`.
+**Engine config.** PCA pipeline (`use_pca: true`, `pca_dimension: 3`)
+— SATOR's preferred surrogate setup even for low-dim recipes because
+it gives a small, dense latent GP and a single SLSQP reconstruction
+back to named ingredients that provably satisfies the sum constraint.
+Acquisition runs through the advanced Sobol-scoring path (any non
+`min`/`max` goal triggers it); the `enforce_above` goal adds a hard
+feasibility mask on the Sobol grid against the GP posterior mean.
+See §6.1.11 for the full contract and the optional
+`enforcement_uncertainty_margin` knob (LCB/UCB-based enforcement).
 
 **What to look for.** The 2×2 figure:
 
 - **(a)** `conductivity` histogram with the narrow green target band
-  `10.5 ± 0.5`. Predictions (red lines) cluster tightly on the target.
+  `10.5 ± 0.5`. Predictions (red lines) land well *above* the target
+  band — a direct visual proof that the hard stability floor
+  dominates the soft conductivity target. This is the intended
+  behavior of the `enforce_*` family: soft goals can be sacrificed to
+  keep hard constraints feasible.
 - **(b)** `viscosity` histogram with the green band `[2.0, 5.0]`.
-  Predictions land close to the low edge of the band — the optimizer
-  is trading viscosity against conductivity.
-- **(c)** `stability` histogram with the floor at 4.2 V. Predictions
-  are *below* the floor — a reminder that the goal types are *scored*,
-  not enforced as hard constraints. The optimizer is making a
-  trade-off; if `stability ≥ 4.2 V` must hold absolutely, add a
-  downstream filter.
-- **(d)** Stacked composition bars. DMC and LiPF6 dominate the
-  predicted recipes, matching the forward model's conductivity peak
-  near `salt ≈ 0.10`.
+  Predictions land inside the band, near the ideal `3.0` — the soft
+  `within_range` goal is respected because it does not conflict with
+  the floor.
+- **(c)** `stability` histogram with the floor at 4.2 V. The title
+  reports `5/5 feasible`. Every prediction sits just above the floor
+  — the `enforce_above` mask filtered the Sobol grid against the GP
+  posterior, and the orchestrator tagged each prediction with
+  `enforced_goals_satisfied=true`. The response's
+  `diagnostics.enforcement` block carries the same information at a
+  batch level.
+- **(d)** Stacked composition bars with `✓` per candidate. All five
+  recipes cluster around `EC ≈ 0.25`, since the forward stability
+  model rewards EC-rich blends. The soft goals *shaped* the selected
+  recipes within this EC-rich subspace.
 
-![demo_08 electrolyte mixed goals](assets/examples/demo_08_electrolyte.png)
+Every returned prediction in the JSON carries
+`enforced_goals_satisfied` and `enforced_violations`, so downstream
+tools can filter the batch deterministically:
+
+```json
+"predictions": [
+  {
+    "candidate": { "EC": 0.25, "DMC": 0.10, ... },
+    "objectives": [17.48, 3.56, 4.241],
+    "enforced_goals_satisfied": true,
+    "enforced_violations": []
+  }
+]
+```
+
+and the top-level diagnostics summarise the batch:
+
+```json
+"diagnostics": {
+  "enforcement": {
+    "enabled": true,
+    "uncertainty_margin": 0.0,
+    "n_total": 5,
+    "n_satisfied": 5,
+    "all_infeasible": false,
+    "per_objective_violations": { "stability": 0 },
+    "goals": [
+      { "objective": "stability", "kind": "above", "lo": 4.2, "hi": null }
+    ]
+  }
+}
+```
+
+![demo_08 electrolyte hard-constraint + PCA](assets/examples/demo_08_electrolyte.png)
 
 ---
 

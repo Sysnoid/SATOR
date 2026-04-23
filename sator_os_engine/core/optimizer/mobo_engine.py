@@ -13,6 +13,12 @@ from .utils import (
     enforce_sum_constraints_np as _enforce_sum_constraints_np,
 )
 from .utils import (
+    evaluate_enforced_goals as _evaluate_enforced_goals,
+)
+from .utils import (
+    extract_enforced_goal_specs as _extract_enforced_goal_specs,
+)
+from .utils import (
     infer_ingredient_and_param_indices as _infer_ingredient_and_param_indices,
 )
 from .utils import (
@@ -260,6 +266,45 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int
                         pass
                 preds.append(pred_item)
 
+            # Hard-constraint goal validation (enforce_above / enforce_below /
+            # enforce_within_range). Runs after candidate selection so that
+            # every returned prediction carries an honest feasibility flag
+            # even when the selector was forced to relax the enforcement mask
+            # (e.g. no Sobol row satisfied all thresholds on the posterior).
+            enf_specs = _extract_enforced_goal_specs(req)
+            enforcement_diag: dict[str, Any] | None = None
+            if enf_specs and preds:
+                mu_mat = np.asarray([p.get("objectives", []) for p in preds], dtype=float)
+                var_mat = np.asarray([p.get("variances", []) for p in preds], dtype=float)
+                margin = float(getattr(cfg, "enforcement_uncertainty_margin", 0.0) or 0.0)
+                mask, viol_rows = _evaluate_enforced_goals(enf_specs, mu_mat, var_mat, margin)
+                per_obj_violations: dict[str, int] = {s["name"]: 0 for s in enf_specs}
+                for i, p in enumerate(preds):
+                    row_ok = bool(mask[i])
+                    p["enforced_goals_satisfied"] = row_ok
+                    p["enforced_violations"] = list(viol_rows[i])
+                    for lbl in viol_rows[i]:
+                        obj_name = lbl.split("<")[0].split(">")[0]
+                        if obj_name in per_obj_violations:
+                            per_obj_violations[obj_name] += 1
+                enforcement_diag = {
+                    "enabled": True,
+                    "uncertainty_margin": margin,
+                    "n_total": len(preds),
+                    "n_satisfied": int(np.sum(mask)),
+                    "all_infeasible": bool(not mask.any()),
+                    "per_objective_violations": per_obj_violations,
+                    "goals": [
+                        {
+                            "objective": s["name"],
+                            "kind": s["kind"],
+                            "lo": s["lo"],
+                            "hi": s["hi"],
+                        }
+                        for s in enf_specs
+                    ],
+                }
+
             # Pareto in a minimization frame: multiply max objectives by -1 (same as -signs)
             pareto_idx = _pareto_front([p["objectives"] for p in preds], minimize_frame=-signs)
             pareto = {"indices": pareto_idx, "points": [preds[i]["objectives"] for i in pareto_idx]}
@@ -283,11 +328,14 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int
                         info["scaler_scale"] = np.asarray(scaler_scale).tolist()
                     encoding_info = info
 
+            diagnostics: dict[str, Any] = {"device": str(tdevice), "cuda_device_index": cuda_idx}
+            if enforcement_diag is not None:
+                diagnostics["enforcement"] = enforcement_diag
             response: dict[str, Any] = {
                 "predictions": preds,
                 "pareto": pareto,
                 "encoding_info": encoding_info,
-                "diagnostics": {"device": str(tdevice), "cuda_device_index": cuda_idx},
+                "diagnostics": diagnostics,
                 "objectives": req.objectives if isinstance(req.objectives, dict) else {},
                 "encoded_dataset": Z.tolist() if (use_pca_model and pca is not None) else None,
             }

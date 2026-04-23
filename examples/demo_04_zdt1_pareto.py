@@ -27,8 +27,15 @@ def zdt1(X: np.ndarray) -> np.ndarray:
 
 
 def main() -> None:
+    # ZDT1 in 4D is deceptively sparse: with only a few dozen random samples the
+    # GP is very uncertain everywhere except the thin manifold it happens to
+    # land on, and qLogEHVI rationally places speculative batch members in
+    # those uncertain corners. That behaviour is correct in a real loop (next
+    # iteration they're either confirmed or discarded), but for a single-shot
+    # demo it makes the picture misleading. Use a denser training grid + a
+    # smaller batch so the returned Pareto candidates land on the true front.
     rng = np.random.default_rng(3)
-    X = rng.uniform(size=(40, D))
+    X = rng.uniform(size=(96, D))
     Y = zdt1(X)
 
     params = [{"name": f"x{i + 1}", "type": "float", "min": 0.0, "max": 1.0} for i in range(D)]
@@ -38,7 +45,7 @@ def main() -> None:
         "objectives": {"f1": {"goal": "min"}, "f2": {"goal": "min"}},
         "optimization_config": {
             "acquisition": "qnehvi",
-            "batch_size": 6,
+            "batch_size": 4,
             "max_evaluations": 32,
             "seed": 5,
             "return_maps": False,
@@ -48,9 +55,7 @@ def main() -> None:
     result = post_optimize_and_wait("demo_04_zdt1", payload)
     preds = result.get("predictions", [])
     if preds:
-        cand = np.array(
-            [[pred["candidate"][f"x{i + 1}"] for i in range(D)] for pred in preds]
-        )
+        cand = np.array([[pred["candidate"][f"x{i + 1}"] for i in range(D)] for pred in preds])
         Yp = zdt1(cand)
     else:
         Yp = np.zeros((0, 2))
