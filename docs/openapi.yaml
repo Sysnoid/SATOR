@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SATOR OS Engine API
-  version: "0.2.0"
+  version: "0.2.1"
   description: |
     Public HTTP/JSON API for the SATOR OS Engine. Optimization and reconstruction
     are asynchronous: POST to submit, then poll `/v1/jobs/{job_id}/result`.

@@ -3,8 +3,8 @@
   Statistical Adaptive Tuning and Optimization Runtime </br>
 </p>
 <p align="center">
-  <a href="https://github.com/WytchDocQ/SatorOptimizer/actions/workflows/ci.yml">
-    <img src="https://github.com/WytchDocQ/SatorOptimizer/actions/workflows/ci.yml/badge.svg" alt="CI">
+  <a href="https://github.com/Sysnoid/SATOR/actions/workflows/ci.yml">
+    <img src="https://github.com/Sysnoid/SATOR/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0.txt">
     <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache-2.0">
@@ -19,22 +19,27 @@ in Docker on CPU or NVIDIA GPU.
 
 SATOR was originally built for **chemical formulations** and **material
 compositions**, but it generalizes to any continuous-parameter black-box
-optimization problem. It supports two input classes simultaneously:
+optimization problem (including high-dimensional parameter sweeps with
+optional latent encoding). It supports two input classes simultaneously:
 
 1. **Compositional “ingredients”** that must sum to a target (mixtures).
 2. **Free parameters** normalized independently.
 
 This makes SATOR suitable for industrial formulation work, process tuning,
-hyperparameter search, or any domain where sample-efficient optimization
-matters.
+hyperparameter search, strategy or trading-parameter studies (when outcomes
+are produced by your own evaluator or backtest), or any domain where
+sample-efficient optimization matters.
 
 ## What you get
 
 - Multi-objective Bayesian optimization via [BoTorch](https://botorch.org/)
   (`qnehvi`, `qehvi`, `qnoisyehvi`, `parego`) and matching single-objective
   variants (`qei`, `qpi`, `qucb`).
-- Advanced goal types: `target`, `within_range`, `minimize_below`,
+- Advanced **soft** goal types: `target`, `within_range`, `minimize_below`,
   `maximize_above`, `maximize_below`, `minimize_above`, `explore`, `improve`.
+- **Hard** threshold goals on the GP posterior: `enforce_above`,
+  `enforce_below`, `enforce_within_range` (optional confidence margin);
+  see [§6 Objectives](docs/06-objectives-and-constraints.md).
 - Sum-to-one and ratio constraints as first-class inputs.
 - Optional PCA encoding with automatic SLSQP reconstruction back to
   original variables.

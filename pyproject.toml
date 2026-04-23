@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sator-os-engine"
-version = "0.1.0"
+version = "0.2.1"
 description = "Stateless multi-objective Bayesian optimization server with a simple HTTP API"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -42,7 +42,7 @@ dev = [
 sator-server = "sator_os_engine.server.main:run"
 
 [project.urls]
-Repository = "https://github.com/WytchDocQ/SatorOptimizer"
+Repository = "https://github.com/Sysnoid/SATOR"
 
 [tool.setuptools.packages.find]
 where = ["."]

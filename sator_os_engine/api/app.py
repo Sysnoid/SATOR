@@ -43,7 +43,7 @@ async def _lifespan(_: FastAPI):
 
 
 def create_app(settings: Settings) -> FastAPI:
-    app = FastAPI(title="SATOR OS Engine", version="0.1.0", lifespan=_lifespan)
+    app = FastAPI(title="SATOR OS Engine", version="0.2.1", lifespan=_lifespan)
 
     # Middlewares
     app.add_middleware(IPFilterMiddleware, settings=settings)

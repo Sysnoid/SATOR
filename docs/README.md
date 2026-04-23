@@ -11,7 +11,7 @@ production-ready optimization server for black-box, multi-objective problems.
 SATOR exposes a single HTTP API and runs either locally or in Docker, on CPU
 or NVIDIA GPU.
 
-> **Version:** `0.2.0` &nbsp;·&nbsp; **API:** HTTP/JSON &nbsp;·&nbsp; **License:** Apache-2.0
+> **Version:** `0.2.1` &nbsp;·&nbsp; **API:** HTTP/JSON &nbsp;·&nbsp; **License:** Apache-2.0
 
 ---
 

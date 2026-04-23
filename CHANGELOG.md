@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-04-23
+
+- **Objectives:** hard-constraint goal family `enforce_above`, `enforce_below`,
+  and `enforce_within_range` — GP-posterior feasibility mask during candidate
+  selection, per-prediction `enforced_goals_satisfied` / `enforced_violations`,
+  and `diagnostics.enforcement`; optional `enforcement_uncertainty_margin` in
+  `OptimizationConfig` for LCB/UCB-style enforcement.
+- **Docs:** `docs/06-objectives-and-constraints.md` and `docs/13-examples.md`
+  updated; demo figures refreshed for Himmelblau, ZDT1, and EV electrolyte
+  (`enforce_above` + PCA).
+- **Examples:** `demo_03` z-axis / contour fix; `demo_04` denser training;
+  `demo_08` uses `enforce_above` for the stability floor and the PCA path.
+- **Tests:** `tests/unit/test_enforced_goals.py`.
+
 ## [0.2.0] - 2026-04-22
 - **Transport:** removed the NATS transport and `nats-py` dependency — SATOR
   now exposes the HTTP API exclusively. Related settings (`SATOR_ENABLE_NATS`,
