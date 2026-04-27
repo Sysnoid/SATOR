@@ -30,6 +30,23 @@ hyperparameter search, strategy or trading-parameter studies (when outcomes
 are produced by your own evaluator or backtest), or any domain where
 sample-efficient optimization matters.
 
+## The SATOR loop
+
+Each HTTP request is **stateless**: you send a **dataset** (historical runs:
+inputs and measured outcomes), a **search space** (continuous parameters,
+bounds, sum-tos, ratios), and **objectives** (min, max, targets, ranges,
+`enforce_*`, etc.). The service fits surrogate **models**, runs
+**acquisition** to score candidate points, and returns the next **optimal
+candidates** (best points or a Pareto set). The diagram’s dashed **evaluate**
+step is *your* outer loop: run new experiments, simulations, or backtests,
+then call again with the enlarged dataset.
+
+<p align="center">
+  <img src="sator_loop.png" alt="SATOR loop: Model, Acquisition, Evaluate, and Optimal candidates" width="90%">
+  <br>
+  <em>SATOR loop — stateless per request; evaluation closes the real-world cycle.</em>
+</p>
+
 ## What you get
 
 - Multi-objective Bayesian optimization via [BoTorch](https://botorch.org/)
