@@ -87,6 +87,64 @@ def _normalize_acquisition_name(req: Any) -> str:
     return s
 
 
+def _objective_sign(goal: str) -> float:
+    """Match ``mobo_engine``: ``+1`` for ``max``, ``-1`` for every other goal.
+
+    The engine fits each GP on ``Y * sign`` so BoTorch always sees a
+    minimization-style frame. Soft scoring (``target``, ``within_range``,
+    thresholds, …) and user-facing thresholds are stated in **original** ``Y``
+    units, so callers must convert posterior means with
+    ``_posterior_mean_to_user_units`` before comparing.
+    """
+    return 1.0 if str(goal).lower() == "max" else -1.0
+
+
+def _posterior_mean_to_user_units(mu: np.ndarray, goal: str) -> np.ndarray:
+    """Undo the engine's sign flip so ``mu`` is in original objective units."""
+    return np.asarray(mu, dtype=float) * _objective_sign(goal)
+
+
+def _target_soft_score(
+    req: Any,
+    cfg_o: dict[str, Any],
+    mu: np.ndarray,
+    var: np.ndarray,
+) -> np.ndarray:
+    """Soft ``goal=target`` score in user units.
+
+    Per-objective knobs (preferred) fall back to ``optimization_config``:
+
+    - ``target_tolerance`` — scale for ``|μ − T|`` (global config if omitted)
+    - ``target_variance_penalty`` — exploration bonus on ``√var``
+    - ``weight`` — multiplies this objective's contribution when scores are
+      summed across targets (default ``1.0``). Use this to emphasize a gap
+      channel (e.g. weight a* higher than L*).
+    """
+    target_val = cfg_o.get("target_value")
+    if target_val is None:
+        return np.zeros_like(mu, dtype=float)
+
+    tol = cfg_o.get("target_tolerance")
+    if tol is None:
+        tol = getattr(req.optimization_config, "target_tolerance", None)
+    tol = float(tol or 0.0)
+
+    var_w = cfg_o.get("target_variance_penalty")
+    if var_w is None:
+        var_w = getattr(req.optimization_config, "target_variance_penalty", None)
+    if var_w is None:
+        var_w = 0.05
+    var_w = float(var_w)
+
+    weight = float(cfg_o.get("weight", 1.0) or 1.0)
+    err = np.abs(mu - float(target_val))
+    if tol > 0:
+        base = -(err / tol) + var_w * np.sqrt(var)
+    else:
+        base = -err + var_w * np.sqrt(var)
+    return weight * base
+
+
 def _acquisition_params(req: Any) -> dict[str, Any]:
     cfg = getattr(req, "optimization_config", None)
     if cfg is None:
@@ -162,7 +220,8 @@ def _enforcement_mask_from_posteriors(
     else) so that all objectives live in a minimization frame. User
     thresholds, on the other hand, are always stated in the original
     ``Y`` units. We therefore flip ``mu`` back to user units before
-    comparing, using the same sign convention as the orchestrator.
+    comparing, using the same sign convention as the orchestrator
+    (see ``_posterior_mean_to_user_units``).
     """
     specs = _extract_enforced_goal_specs(req)
     if not specs:
@@ -170,15 +229,10 @@ def _enforcement_mask_from_posteriors(
     if not mu_list:
         return None
     obj_cfgs = list(req.objectives.values()) if isinstance(req.objectives, dict) else []
-    signs = np.array(
-        [1.0 if str(c.get("goal", "min")).lower() == "max" else -1.0 for c in obj_cfgs],
-        dtype=float,
-    )
     mu_cols = []
     for k, m in enumerate(mu_list):
-        col = np.asarray(m, dtype=float).ravel()
-        s = float(signs[k]) if k < signs.size else -1.0
-        mu_cols.append(col * s)
+        goal_k = str(obj_cfgs[k].get("goal", "min")).lower() if k < len(obj_cfgs) else "min"
+        mu_cols.append(_posterior_mean_to_user_units(m, goal_k))
     mu_mat = np.column_stack(mu_cols)
     if var_list and len(var_list) == len(mu_list):
         # Variance is invariant under sign flip (Var[-X] = Var[X]).
@@ -308,24 +362,27 @@ def select_candidates_single_objective(
         post = model.models[0].posterior(Zgrid)
     else:
         post = model.models[0].posterior(grid)
-    mu = post.mean.detach().cpu().numpy().ravel()
+    mu_signed = post.mean.detach().cpu().numpy().ravel()
     var = post.variance.detach().cpu().numpy().ravel()
+    # Soft scores / thresholds are in original Y units; undo engine sign flip.
+    mu = _posterior_mean_to_user_units(mu_signed, goal)
 
-    target_val = cfg0.get("target_value")
-    # Base score by direction
+    # Base score by direction (``mu`` is now in user / original Y units)
     if goal in ("min", "minimize", "minimize_below", "minimize_above"):
         score = -mu
     elif goal in ("max", "maximize", "maximize_below", "maximize_above"):
         score = mu
     elif goal in ("within_range",):
         score = np.zeros_like(mu)
-    elif goal == "target" and target_val is not None:
-        tol = float(getattr(req.optimization_config, "target_tolerance", 0.0) or 0.0)
-        var_w = float(getattr(req.optimization_config, "target_variance_penalty", 0.05) or 0.05)
-        if tol > 0:
-            score = -(np.abs(mu - float(target_val)) / tol) + var_w * np.sqrt(var)
-        else:
-            score = -np.abs(mu - float(target_val)) + var_w * np.sqrt(var)
+    elif goal == "target" and cfg0.get("target_value") is not None:
+        score = _target_soft_score(req, cfg0, mu, var)
+    elif goal in ("explore", "probe"):
+        score = np.sqrt(var)
+    elif goal == "improve":
+        # Prefer predicted improvement over the best observed value (user units).
+        y_col = Y_np[:, 0] if getattr(Y_np, "ndim", 1) > 1 else np.asarray(Y_np, dtype=float).ravel()
+        best = float(np.min(y_col))
+        score = np.maximum(0.0, best - mu)
     else:
         score = -mu
     # Threshold / range shaping (demo-compatible, value scale)
@@ -508,8 +565,8 @@ def select_candidates_multiobjective(
     obj_cfgs = list(req.objectives.values()) if isinstance(req.objectives, dict) else []
     for k, cfg_o in enumerate(obj_cfgs):
         goal = str(cfg_o.get("goal", "min")).lower()
-        target_val = cfg_o.get("target_value")
-        mu = mu_list[k]
+        # Posterior is in signed training space; soft scores use original Y units.
+        mu = _posterior_mean_to_user_units(mu_list[k], goal)
         var = var_list[k]
         # base direction
         if goal in ("min", "minimize", "minimize_below", "minimize_above"):
@@ -518,22 +575,20 @@ def select_candidates_multiobjective(
             score_k = mu
         elif goal == "within_range":
             score_k = np.zeros_like(mu)
-        elif goal == "target" and target_val is not None:
-            tol = float(getattr(req.optimization_config, "target_tolerance", 0.0) or 0.0)
-            var_w = float(getattr(req.optimization_config, "target_variance_penalty", 0.05) or 0.05)
-            if tol > 0:
-                score_k = -(np.abs(mu - float(target_val)) / tol) + var_w * np.sqrt(var)
-            else:
-                score_k = -np.abs(mu - float(target_val)) + var_w * np.sqrt(var)
+        elif goal == "target" and cfg_o.get("target_value") is not None:
+            score_k = _target_soft_score(req, cfg_o, mu, var)
         elif goal in ("explore", "probe"):
             score_k = np.sqrt(var)
         elif goal == "improve":
-            gk = str(goals[k] if k < len(goals) else "min").lower()
-            sgn = 1.0 if gk == "max" else -1.0
             y_col = Y_np[:, k] if Y_np.ndim > 1 else np.asarray(Y_np, dtype=float).ravel()
-            t_y_ref = y_col * sgn
-            best = float(np.max(t_y_ref))
-            score_k = np.maximum(0.0, best - mu)
+            # Direction from the declared goal list when present; default minimize.
+            gk = str(goals[k] if k < len(goals) else "min").lower()
+            if gk == "max":
+                best = float(np.max(y_col))
+                score_k = np.maximum(0.0, mu - best)
+            else:
+                best = float(np.min(y_col))
+                score_k = np.maximum(0.0, best - mu)
         else:
             score_k = -mu
         # threshold/range shaping
@@ -571,6 +626,7 @@ def select_candidates_multiobjective(
         if combined.any():
             feas_arr = combined
     # Hard-enforce goal feasibility on the GP posterior across all objectives.
+    # Helper unsigns mu itself (signed training frame → user units).
     enf_mask = _enforcement_mask_from_posteriors(req, mu_list, var_list)
     if enf_mask is not None:
         combined = feas_arr & enf_mask

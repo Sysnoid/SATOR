@@ -60,6 +60,9 @@ certs/
 # Local development notes (not committed)
 local-dev-docs/
 
+# Private working data (datasets, lab notes — never commit)
+private/
+
 # Example outputs
 examples/responses/
 

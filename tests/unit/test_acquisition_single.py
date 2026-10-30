@@ -29,12 +29,23 @@ def _make_params():
     ]
 
 
-def _build_gp_for_func(func, n=60, seed=0):
+def _outcome_sign(goal: str) -> float:
+    """Match ``mobo_engine``: GP training uses ``Y * sign`` (+1 max, -1 else)."""
+    return 1.0 if str(goal).lower() == "max" else -1.0
+
+
+def _build_gp_for_func(func, n=60, seed=0, *, goal: str = "min"):
+    """Fit a GP the same way the engine does (signed outcomes).
+
+    ``y`` in the return value stays in **user units**; the model is trained on
+    ``y * sign`` so soft-goal scoring can unsign posteriors consistently.
+    """
     rng = np.random.default_rng(seed)
     X = rng.uniform(0.0, 1.0, size=(n, 2))
     y = func(X).reshape(n, 1)
+    sign = _outcome_sign(goal)
     X_t = torch.tensor(X, dtype=torch.double)
-    Y_t = torch.tensor(y, dtype=torch.double)
+    Y_t = torch.tensor(y * sign, dtype=torch.double)
     model = build_models(X_t, Y_t, SimpleNamespace(gp_config={"noise": 1e-5}))
     return model, X, y
 
@@ -57,10 +68,12 @@ def _make_req(goal: str, *, threshold=None, range_=None, tol=0.05, var_pen=0.05)
     )
 
 
-def _posterior_mean(model, x):
+def _posterior_mean_user(model, x, *, goal: str):
+    """Posterior mean mapped back to user / original Y units."""
     xt = torch.tensor(x, dtype=torch.double).reshape(1, -1)
     post = model.models[0].posterior(xt)
-    return float(post.mean.detach().cpu().numpy().ravel()[0])
+    mu_signed = float(post.mean.detach().cpu().numpy().ravel()[0])
+    return mu_signed * _outcome_sign(goal)
 
 
 def test_min_goal_selects_near_minimum():
@@ -69,7 +82,7 @@ def test_min_goal_selects_near_minimum():
     def f(X):
         return X[:, 0] + X[:, 1]
 
-    model, X, y = _build_gp_for_func(f, n=120, seed=1)
+    model, X, y = _build_gp_for_func(f, n=120, seed=1, goal="min")
     params = _make_params()
     tdtype = torch.double
     tdevice = torch.device("cpu")
@@ -103,7 +116,7 @@ def test_max_goal_selects_near_maximum():
     def f(X):
         return X[:, 0] + X[:, 1]
 
-    model, X, y = _build_gp_for_func(f, n=120, seed=2)
+    model, X, y = _build_gp_for_func(f, n=120, seed=2, goal="max")
     params = _make_params()
     tdtype = torch.double
     tdevice = torch.device("cpu")
@@ -137,7 +150,7 @@ def test_target_goal_prefers_means_near_target():
     def f(X):
         return X[:, 0] + X[:, 1]
 
-    model, X, y = _build_gp_for_func(f, n=140, seed=3)
+    model, X, y = _build_gp_for_func(f, n=140, seed=3, goal="target")
     params = _make_params()
     tdtype = torch.double
     tdevice = torch.device("cpu")
@@ -162,7 +175,7 @@ def test_target_goal_prefers_means_near_target():
         Y_np=y,
     )
     x_best = cand[0].detach().cpu().numpy()
-    mu = _posterior_mean(model, x_best)
+    mu = _posterior_mean_user(model, x_best, goal="target")
     assert abs(mu - 1.0) < 0.25
 
 
@@ -172,7 +185,7 @@ def test_within_range_prefers_inside_band():
     def f(X):
         return X[:, 0] + X[:, 1]
 
-    model, X, y = _build_gp_for_func(f, n=120, seed=4)
+    model, X, y = _build_gp_for_func(f, n=120, seed=4, goal="within_range")
     params = _make_params()
     tdtype = torch.double
     tdevice = torch.device("cpu")
@@ -196,7 +209,7 @@ def test_within_range_prefers_inside_band():
         Y_np=y,
     )
     x_best = cand[0].detach().cpu().numpy()
-    mu = _posterior_mean(model, x_best)
+    mu = _posterior_mean_user(model, x_best, goal="within_range")
     assert 0.6 <= mu <= 1.4
 
 
@@ -206,7 +219,7 @@ def test_minimize_below_encourages_below_threshold():
     def f(X):
         return X[:, 0] + X[:, 1]
 
-    model, X, y = _build_gp_for_func(f, n=120, seed=5)
+    model, X, y = _build_gp_for_func(f, n=120, seed=5, goal="minimize_below")
     params = _make_params()
     tdtype = torch.double
     tdevice = torch.device("cpu")
@@ -231,7 +244,7 @@ def test_minimize_below_encourages_below_threshold():
         Y_np=y,
     )
     x_best = cand[0].detach().cpu().numpy()
-    mu = _posterior_mean(model, x_best)
+    mu = _posterior_mean_user(model, x_best, goal="minimize_below")
     assert mu <= 0.8
 
 
@@ -241,7 +254,7 @@ def test_maximize_above_encourages_above_threshold():
     def f(X):
         return X[:, 0] + X[:, 1]
 
-    model, X, y = _build_gp_for_func(f, n=120, seed=6)
+    model, X, y = _build_gp_for_func(f, n=120, seed=6, goal="maximize_above")
     params = _make_params()
     tdtype = torch.double
     tdevice = torch.device("cpu")
@@ -266,5 +279,5 @@ def test_maximize_above_encourages_above_threshold():
         Y_np=y,
     )
     x_best = cand[0].detach().cpu().numpy()
-    mu = _posterior_mean(model, x_best)
+    mu = _posterior_mean_user(model, x_best, goal="maximize_above")
     assert mu >= 1.0

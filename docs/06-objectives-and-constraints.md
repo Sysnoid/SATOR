@@ -67,16 +67,31 @@ Drive `f(x)` as close as possible to a desired value `T`:
 ```json
 "ph": {
   "goal": "target",
-  "target_value": 7.0
+  "target_value": 7.0,
+  "target_tolerance": 0.2,
+  "weight": 1.0
 }
 ```
 
-Optional knobs (set on `optimization_config`):
+Optional knobs on the **objective** (preferred when you have several targets):
 
-- `target_tolerance` — values within `±target_tolerance` of `T` are treated
-  as equally good; wider bands yield more robust candidates.
-- `target_variance_penalty` — weight of the posterior-variance penalty when
-  choosing among equally accurate candidates.
+- `target_tolerance` — scale for `|μ − T|` on this channel. Different Lab /
+  process channels should usually get different tolerances (e.g. from sample
+  std). Falls back to `optimization_config.target_tolerance` when omitted.
+- `weight` — multiplies this objective's soft score before scores are summed
+  across targets (default `1.0`). Raise it to emphasize a gap channel.
+- `target_variance_penalty` — exploration bonus on `√var` for this objective;
+  falls back to `optimization_config.target_variance_penalty`.
+
+Global fallbacks on `optimization_config`:
+
+- `target_tolerance` — used when an objective omits its own tolerance.
+- `target_variance_penalty` — used when an objective omits its own penalty.
+
+When several `goal: target` objectives are active they are combined by
+**summing** the soft scores (goal-shaped Sobol path — not Pareto EHVI). That
+sum is an L1-style trade-off, not CIE ΔE. For color matching prefer a single
+`min` objective on ΔE when you want the geometric Lab distance.
 
 ### 6.1.4 `minimize_below`
 

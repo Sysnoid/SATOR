@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- **Fix:** soft advanced-goal scoring (`target`, `within_range`, thresholds,
+  `improve`) now converts GP posterior means from the engine's signed training
+  frame back to original `Y` units before comparing to user `target_value` /
+  ranges. Previously `run_optimization` fit on `Y * sign` but scored against
+  unsigned targets, so `goal=target` collapsed toward minimizing `|Y|` instead
+  of approaching `T`. Hard `enforce_*` masking was already correct. Regression
+  tests in `tests/unit/test_target_goal_engine_signs.py`.
+- **Objectives:** per-objective `target_tolerance`, `target_variance_penalty`,
+  and `weight` on `goal: target` (fallback to the global optimization_config
+  knobs). Multi-target soft scores are a weighted sum — document that color
+  matching often prefers a single `min` on ΔE instead.
+
 ## [0.2.1] - 2026-04-23
 
 - **Objectives:** hard-constraint goal family `enforce_above`, `enforce_below`,
