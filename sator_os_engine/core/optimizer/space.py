@@ -52,22 +52,48 @@ def snap_numeric(x: np.ndarray, params: list[dict[str, Any]]) -> np.ndarray:
             y[j] = float(min(max(int(np.rint(y[j])), 0), n - 1))
         else:
             y[j] = float(np.clip(y[j], float(param["min"]), float(param["max"])))
+            step = param.get("resolution")
+            if step is not None and float(step) > 0:
+                step_f = float(step)
+                y[j] = float(np.clip(round(y[j] / step_f) * step_f, float(param["min"]), float(param["max"])))
     return y
 
 
-def candidate_by_name(x: np.ndarray, params: list[dict[str, Any]]) -> dict[str, Any]:
-    snapped = snap_numeric(x, params)
+def balance_resolved_sums(
+    x: np.ndarray,
+    params: list[dict[str, Any]],
+    groups: list[dict[str, Any]] | None,
+) -> np.ndarray:
+    """Put the rounding remainder on the largest ingredient so each sum stays exact."""
+    y = np.asarray(x, dtype=float).reshape(-1).copy()
+    for group in groups or []:
+        indices = [int(i) for i in group.get("indices", []) if 0 <= int(i) < y.shape[0]]
+        if len(indices) < 2:
+            continue
+        if not any(params[i].get("resolution") not in (None, 0, 0.0) for i in indices):
+            continue
+        target = float(group.get("target", group.get("target_sum", 1.0)))
+        carrier = max(indices, key=lambda i: y[i])
+        others = [i for i in indices if i != carrier]
+        remainder = target - float(np.sum(y[others]))
+        lo, hi = float(params[carrier]["min"]), float(params[carrier]["max"])
+        y[carrier] = float(min(max(remainder, lo), hi))
+    return y
+
+
+def candidate_by_name(x: np.ndarray, params: list[dict[str, Any]], *, snap: bool = True) -> dict[str, Any]:
+    values = snap_numeric(x, params) if snap else np.asarray(x, dtype=float).reshape(-1)
     out: dict[str, Any] = {}
     for j, param in enumerate(params):
         name = str(param["name"])
         ptype = param.get("type", "float")
         if ptype == "categorical":
             choices = _choices(param)
-            out[name] = choices[int(snapped[j])] if choices else None
+            out[name] = choices[int(values[j])] if choices else None
         elif ptype == "int":
-            out[name] = int(snapped[j])
+            out[name] = int(values[j])
         else:
-            out[name] = float(snapped[j])
+            out[name] = float(values[j])
     return out
 
 

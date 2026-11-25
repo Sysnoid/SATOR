@@ -16,6 +16,7 @@ from .routes.explain import router as explain_router
 from .routes.jobs import router as jobs_router
 from .routes.optimize import router as optimize_router
 from .routes.reconstruct import router as reconstruct_router
+from .routes.validate import router as validate_router
 
 log = logging.getLogger("sator")
 
@@ -54,6 +55,7 @@ def create_app(settings: Settings) -> FastAPI:
     app.include_router(optimize_router, prefix="/v1", tags=["optimize"])
     app.include_router(design_router, prefix="/v1", tags=["design"])
     app.include_router(explain_router, prefix="/v1", tags=["explain"])
+    app.include_router(validate_router, prefix="/v1", tags=["validate"])
     app.include_router(reconstruct_router, prefix="/v1", tags=["reconstruct"])
     app.include_router(jobs_router, prefix="/v1", tags=["jobs"])
     register_error_handlers(app)

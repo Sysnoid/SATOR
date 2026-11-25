@@ -11,7 +11,7 @@ from ..models.optimize import OptimizeRequest
 from .device import resolve_torch_device
 from .maps import compute_gp_maps
 from .project import project_to_feasible
-from .space import candidate_by_name, clip_to_bounds, encode_dataset, snap_numeric
+from .space import balance_resolved_sums, candidate_by_name, clip_to_bounds, encode_dataset, snap_numeric
 from .utils import (
     evaluate_enforced_goals as _evaluate_enforced_goals,
 )
@@ -188,6 +188,22 @@ def _run_optimization_locked(
     y_finite = np.isfinite(Y_np)
     x_finite = np.isfinite(X_np).all(axis=1)
     dropped_rows = int(np.sum(~y_finite.all(axis=1) | ~x_finite))
+    advisor = None
+    if str(getattr(cfg, "route", "direct") or "direct").strip().lower() == "auto":
+        from .advisor import advise_route
+
+        categorical = any(param.get("type") == "categorical" for param in params)
+        advisor = advise_route(
+            int(X_np.shape[0]),
+            int(X_np.shape[1]),
+            model=str(getattr(cfg, "model", "gp") or "gp").strip().lower(),
+            use_pca=bool(getattr(cfg, "use_pca", False)),
+            mode=str(getattr(cfg, "mode", "lab") or "lab").strip().lower(),
+            categorical=categorical,
+            ilr=str(getattr(cfg, "mixture_transform", None) or "none").strip().lower() == "ilr",
+        )
+        cfg.model = advisor["model"]
+        cfg.route = advisor["route"]
     k_req = req.optimization_config.pca_dimension
     use_pca_model = bool(req.optimization_config.use_pca and k_req is not None)
     mixture = str(getattr(cfg, "mixture_transform", None) or "none").strip().lower()
@@ -438,7 +454,8 @@ def _run_optimization_locked(
             supports=None if supports is groups else supports,
         )
         recipe = snap_numeric(recipe, params)
-        return recipe, ok, candidate_by_name(recipe, params)
+        recipe = balance_resolved_sums(recipe, params, groups)
+        return recipe, ok, candidate_by_name(recipe, params, snap=False)
 
     for i in range(cand.shape[0]):
         requested = cand[i : i + 1]
@@ -670,7 +687,86 @@ def _run_optimization_locked(
             row_index=train_index,
         )
 
-    pareto_idx = _pareto_front([p["objectives"] for p in preds], minimize_frame=-signs)
+    from .replicates import best_observed_index, expand_replicates, posterior_in_user_units
+
+    if scoring_supplied:
+        pareto_idx = _pareto_front([p["objectives"] for p in preds], minimize_frame=-signs)
+    elif bool(getattr(cfg, "repeat_best", False)) and X_np.shape[0] > 0:
+        from .project import feasibility_violations
+
+        best_i = best_observed_index(Y_np, signs)
+        x_best = np.asarray(X_np[best_i], dtype=float).reshape(-1)
+        if np.isfinite(x_best).all():
+            violations = feasibility_violations(x_best, search_bounds, groups, ratios)
+            encoded = None
+            residual = None
+            if pca_in_x:
+                from .pca_model import off_subspace_residual
+
+                latent_model = acq_model.models[0] if hasattr(acq_model, "models") else acq_model
+                z_actual = (
+                    latent_model.encode(torch.tensor(x_best.reshape(1, -1), dtype=tdtype, device=tdevice))
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .reshape(-1)
+                )
+                encoded = z_actual.tolist()
+                x_model = torch.tensor(z_actual.reshape(1, -1), dtype=tdtype, device=tdevice)
+                residual = float(
+                    off_subspace_residual(
+                        x_best,
+                        np.asarray(pca.components_),
+                        np.asarray(pca.mean_),
+                        np.asarray(pca.scaler_mean_),
+                        np.asarray(pca.scaler_scale_),
+                    )[0]
+                )
+            elif use_ilr and encoder is not None:
+                z_actual = encoder.forward(x_best).reshape(-1)
+                encoded = z_actual.tolist()
+                x_model = torch.tensor(z_actual.reshape(1, -1), dtype=tdtype, device=tdevice)
+            elif use_pca_model and pca is not None:
+                z_actual = input_to_z_norm(pca, pc_mins, pc_range, x_best.reshape(1, -1)).reshape(-1)
+                encoded = z_actual.tolist()
+                x_model = torch.tensor(np.asarray(z_actual, dtype=float).reshape(1, -1), dtype=tdtype, device=tdevice)
+            else:
+                x_model = torch.tensor(x_best.reshape(1, -1), dtype=tdtype, device=tdevice)
+            means, variances = posterior_in_user_units(model, x_model, signs, n_obj)
+            control: dict[str, Any] = {
+                "candidate": candidate_by_name(x_best, params, snap=False),
+                "objectives": means,
+                "variances": variances,
+                "candidate_feasible": not violations,
+                "control": True,
+                "replicate": 1,
+            }
+            if residual is not None:
+                control["off_subspace_residual"] = residual
+            if encoded is not None:
+                control["encoded"] = encoded
+                control["encoded_actual"] = encoded
+            if violations:
+                control["violations"] = violations
+            control["explanation"] = explain_prediction(
+                means=means,
+                variances=variances,
+                recipe=x_best,
+                trained_x=X_np[train_index],
+                trained_y=Y_np[train_index],
+                bounds=search_bounds,
+                objective_names=obj_names,
+                goals=goals,
+                sensitive=sensitive_names,
+                row_index=train_index,
+            )
+            preds.append(control)
+
+    if not scoring_supplied:
+        preds = expand_replicates(preds, int(getattr(cfg, "n_replicates", 1) or 1))
+        unique = [i for i, pred in enumerate(preds) if int(pred.get("replicate", 1)) == 1]
+        local_front = _pareto_front([preds[i]["objectives"] for i in unique], minimize_frame=-signs)
+        pareto_idx = [unique[i] for i in local_front]
     pareto = {"indices": pareto_idx, "points": [preds[i]["objectives"] for i in pareto_idx]}
 
     encoding_info = None
@@ -721,6 +817,8 @@ def _run_optimization_locked(
         "sator_version": sator_version,
         "botorch_version": botorch_version,
     }
+    if advisor is not None:
+        diagnostics["advisor"] = advisor
     if diagnostics["model"] == "kpls":
         kpls_report: dict[str, Any] = {}
         for name, submodel in zip(obj_names, model.models, strict=False):
@@ -746,6 +844,17 @@ def _run_optimization_locked(
         "objectives": req.objectives if isinstance(req.objectives, dict) else {},
         "encoded_dataset": Z.tolist() if (use_pca_model and pca is not None) else None,
     }
+    batch_mass = getattr(cfg, "batch_mass", None)
+    if batch_mass is not None:
+        from .batch_sheet import batch_sheet
+
+        response["batch_sheet"] = batch_sheet(
+            preds,
+            params,
+            groups,
+            float(batch_mass),
+            str(getattr(cfg, "batch_unit", "g") or "g"),
+        )
 
     if cfg.return_maps:
         try:

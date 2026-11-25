@@ -33,6 +33,7 @@ Every call except `/livez`, `/readyz`, and `/metrics` requires `x-api-key`.
 | `GET`  | `/metrics`                       | Prometheus metrics *(if `SATOR_ENABLE_METRICS=true`)* |
 | `POST` | `/v1/optimize`                   | Submit an optimization job *(async)* |
 | `POST` | `/v1/explain`                    | Score supplied recipes and explain them *(async)* |
+| `POST` | `/v1/validate`                   | Check a dataset for duplicates, bounds, sums, missing values, and collinear columns |
 | `POST` | `/v1/reconstruct`                | Submit a reconstruction job *(async)* |
 | `GET`  | `/v1/jobs/{job_id}`              | Job status |
 | `GET`  | `/v1/jobs/{job_id}/result`       | Final job result *(once `SUCCEEDED`)* |
@@ -113,8 +114,12 @@ Supported `goal` values and their extra fields are detailed in
 | `acquisition` | string | `qnehvi` | `qnehvi`, `qehvi`, `qnoisyehvi`, `qlognei`, `parego`, `qei`, `qpi`, `qucb`, `sobol`, or `auto`. `auto` with `mode: lab` uses qLogNEI / qLogNEHVI. |
 | `mode` | `lab` \| `throughput` | `lab` | `lab` treats `acquisition: auto` as noisy. `throughput` keeps qLogEI / qLogEHVI unless `Yvar`, replicates, or failures are present. |
 | `model` | `gp` \| `saas_map` \| `saas` \| `kpls` | `gp` | Surrogate on the original inputs. `saas_map` is MAP-SAAS. `saas` is fully Bayesian SAAS (NUTS; `gp_config.warmup_steps` 256, `num_samples` 128, `thinning` 16). `kpls` is a Matern kernel on PLS scores, rank `gp_config.kpls_rank` (default 4). |
-| `route` | `direct` \| `trust_region` | `direct` | `trust_region` replays a TuRBO box from the ordered dataset and searches inside it. The box is in `diagnostics.trust_region`. |
-| `batch_size` | int 1–16 | `4` | Number of candidates returned per request. |
+| `route` | `direct` \| `trust_region` \| `auto` | `direct` | `trust_region` searches a TuRBO box replayed from the ordered dataset. `auto` chooses the model and the route from the number of rows and inputs and returns the reason in `diagnostics.advisor`. |
+| `batch_mass` | float | — | When set, the response includes `batch_sheet` with grams per well for this total mass. |
+| `batch_unit` | string | `g` | Unit label on the batch sheet. |
+| `n_replicates` | int 1–8 | `1` | List each new recipe this many times. The control well is not repeated. |
+| `repeat_best` | bool | `false` | Add one well that repeats the best recipe observed so far, for a drift check. |
+| `batch_size` | int 1–16 | `4` | Number of new recipes per request. Replicates and the control well are extra. |
 | `max_evaluations` | int ≥ 1 | `100` | Accepted for compatibility. The acquisition loop uses `advanced.acq_maxiter` (default 200). |
 | `seed` | int | — | RNG seed. Omitted seeds are drawn at random and returned in `diagnostics.seed`. |
 | `use_pca` | bool | `false` | Fit PCA on `X` for modeling and/or visualization. |
@@ -233,7 +238,7 @@ use the `sobol` grid path regardless of the `acquisition` string.
 }
 ```
 
-`explanation` is attached to every prediction. `mean` and `sd` are in the units of `Y`. `nearest_tested.distance` is the Euclidean distance in the unit search box, with a categorical mismatch counting as 1. `index` points at the rows the GP was fit on, after replicate rows have been averaged. `role` is `exploit` when one objective improves on the best tested value and the recipe is close to existing data, `tradeoff` for a multi-objective recipe near that data, and `explore` otherwise. `diagnostics.sensitivities` ranks parameters by inverse lengthscale, mapped back to the original columns when the GP was trained in PCA or ILR coordinates.
+Each prediction has `replicate` (starting at 1). `control: true` marks the well that repeats the best tested recipe when `repeat_best` is set. `pareto.indices` point at replicate 1, so copies of the same recipe are not listed again. `explanation` is attached to every prediction. `mean` and `sd` are in the units of `Y`. `nearest_tested.distance` is the Euclidean distance in the unit search box, with a categorical mismatch counting as 1. `index` points at the rows the GP was fit on, after replicate rows have been averaged. `role` is `exploit` when one objective improves on the best tested value and the recipe is close to existing data, `tradeoff` for a multi-objective recipe near that data, and `explore` otherwise. `diagnostics.sensitivities` ranks parameters by inverse lengthscale, mapped back to the original columns when the GP was trained in PCA or ILR coordinates.
 
 ---
 
@@ -331,6 +336,21 @@ Returns the terminal payload. When `status=FAILED`, the body is:
 ```
 
 Results are retained for `SATOR_RESULT_TTL_SEC` seconds after completion.
+
+### 5.5.3 `POST /v1/validate`
+
+Synchronous check before a job. The body is `dataset`, `search_space`, and optional `sum_constraints`. The response is `{ "ok": true, "issues": [] }` or `ok: false` with issues coded `nan`, `duplicate`, `out_of_bounds`, `sum`, `constant`, `collinear`, or `shape`.
+
+```python
+from sator_os_engine.client import SatorClient, dataset_from_frame, predictions_frame
+
+with SatorClient("http://localhost:8080", api_key) as sator:
+    check = sator.validate({"dataset": dataset, "search_space": space})
+    result = sator.suggest(payload)
+frame = predictions_frame(result)
+```
+
+`suggest` posts `/v1/optimize` and polls `/v1/jobs/{id}` until the job completes. `dataset_from_frame` and `predictions_frame` need pandas.
 
 ---
 

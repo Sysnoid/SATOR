@@ -66,7 +66,15 @@ class OptimizationConfig(BaseModel):
     # gp: exact ARD GP. saas_map: MAP sparse prior. saas: NUTS sparse prior. kpls: PLS kernel.
     model: str = "gp"
     # direct searches the full box. trust_region searches the replayed TuRBO box.
+    # auto picks the model and the route from the shape of the history.
     route: str = "direct"
+    # When set, the response includes a gram sheet for this batch mass.
+    batch_mass: float | None = Field(default=None, gt=0)
+    batch_unit: str = "g"
+    # Each new recipe is listed this many times. A control well is not repeated.
+    n_replicates: int = Field(1, ge=1, le=8)
+    # One extra well that repeats the best recipe observed so far.
+    repeat_best: bool = False
 
     @model_validator(mode="after")
     def _known_names(self) -> OptimizationConfig:
@@ -113,8 +121,8 @@ class OptimizationConfig(BaseModel):
         self.route = route_name
         if model_name not in {"gp", "saas_map", "saas", "kpls"}:
             raise ValueError("model must be 'gp', 'saas_map', 'saas', or 'kpls'")
-        if route_name not in {"direct", "trust_region"}:
-            raise ValueError("route must be 'direct' or 'trust_region'")
+        if route_name not in {"direct", "trust_region", "auto"}:
+            raise ValueError("route must be 'direct', 'trust_region', or 'auto'")
         if model_name in {"saas", "saas_map", "kpls"} and self.use_pca:
             raise ValueError(f"model {model_name!r} cannot be combined with use_pca")
         if model_name in {"saas", "saas_map"} and transform == "ilr":
@@ -251,6 +259,8 @@ class OptimizeRequest(BaseModel):
             lo, hi = float(p["min"]), float(p["max"])
             if not np.isfinite(lo) or not np.isfinite(hi) or lo >= hi:
                 raise ValueError(f"search_space.parameters.{name}: min must be < max")
+            if p.get("resolution") is not None and float(p["resolution"]) <= 0:
+                raise ValueError(f"search_space.parameters.{name}: resolution must be positive")
 
     @staticmethod
     def _validate_x_row(i: int, row: list[Any] | tuple[Any, ...], params: list[dict[str, Any]]) -> None:
