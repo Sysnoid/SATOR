@@ -97,6 +97,18 @@ re-applied *after* the fit and the parameter is frozen so optimization never
 overwrites it. See [§8.1](08-advanced-tuning.md#81-gaussian-process) for
 every supported knob.
 
+`model` selects the surrogate. `gp` is the exact ARD GP. `saas_map` and `saas` put a sparse prior on the inverse lengthscales, the first by maximum a posteriori and the second by NUTS. `kpls` measures distance after a partial-least-squares projection of the recipe, and the acquisition still searches the original variables. `route: "trust_region"` limits that search to a TuRBO box replayed from the ordered dataset.
+
+| Situation | Ask for |
+|---|---|
+| A few ingredients matter, and the call should stay cheap | `model: "saas_map"` |
+| The same, and a posterior over relevance is worth the wait | `model: "saas"` |
+| The campaign is long, or the objective is rugged | `route: "trust_region"` |
+| The effect is a blend or a ratio across many ingredients | `model: "kpls"` |
+| None of the above | `model: "gp"`, `route: "direct"` |
+
+PCA remains a compatibility route. These choices do not use it.
+
 ## 7.5 Step 4 — Candidate selection (acquisition)
 
 - **File:** `sator_os_engine/core/optimizer/acquisition.py`

@@ -13,6 +13,8 @@ from botorch.models.transforms.input import InputTransform, Normalize
 from botorch.models.transforms.outcome import OutcomeTransform, Standardize, TransformedPosterior
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
+from .kpls import fit_kpls_weights, kpls_covar
+
 
 def _apply_gp_hint_priors(m: SingleTaskGP, cfg_gp: dict[str, Any], tX: torch.Tensor) -> None:
     """Set initial lengthscale / outputscale / noise before MLL optimization (may be overridden by fit)."""
@@ -172,6 +174,61 @@ def _outcome_transform(yi: torch.Tensor, mode: str | None):
     return Standardize(m=1)
 
 
+def _gp_settings(cfg) -> dict:
+    if cfg is None:
+        return {}
+    raw = getattr(cfg, "gp_config", None)
+    if isinstance(raw, dict):
+        return dict(raw)
+    advanced = getattr(cfg, "advanced", None)
+    nested = advanced.get("gp") if isinstance(advanced, dict) else None
+    return dict(nested) if isinstance(nested, dict) else {}
+
+
+def _fit_saas(xi, yi, yvar_i, transform, outcome, cfg):
+    from botorch.fit import fit_fully_bayesian_model_nuts
+    from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+
+    settings = _gp_settings(cfg)
+    model = SaasFullyBayesianSingleTaskGP(
+        xi,
+        yi,
+        train_Yvar=yvar_i,
+        input_transform=transform,
+        outcome_transform=outcome,
+    )
+    fit_fully_bayesian_model_nuts(
+        model,
+        warmup_steps=int(settings.get("warmup_steps", 256)),
+        num_samples=int(settings.get("num_samples", 128)),
+        thinning=int(settings.get("thinning", 16)),
+        disable_progbar=bool(settings.get("disable_progbar", True)),
+    )
+    return model
+
+
+def _fit_kpls(xi, yi, yvar_i, transform, outcome, cfg):
+    settings = _gp_settings(cfg)
+    with torch.no_grad():
+        normalized = xi if transform is None else transform(xi)
+    weights_np, _rank = fit_kpls_weights(
+        normalized.detach().cpu().numpy(),
+        yi.detach().cpu().numpy(),
+        settings.get("kpls_rank"),
+    )
+    weights = torch.tensor(weights_np, dtype=xi.dtype, device=xi.device)
+    model = SingleTaskGP(
+        xi,
+        yi,
+        train_Yvar=yvar_i,
+        covar_module=kpls_covar(weights),
+        input_transform=transform,
+        outcome_transform=outcome,
+    )
+    model.register_buffer("kpls_weights", weights)
+    return model
+
+
 def build_models(
     tX: torch.Tensor,
     tY: torch.Tensor,
@@ -209,6 +266,7 @@ def build_models(
             if bool(torch.isfinite(col).all()) and float(col.min()) >= 0.0:
                 yvar_i = col.clamp_min(1e-10)
         outcome = _outcome_transform(yi, y_norm)
+        kind = str(getattr(cfg, "model", "gp") or "gp").strip().lower()
         if cat_dims:
             m = MixedSingleTaskGP(
                 xi,
@@ -218,6 +276,23 @@ def build_models(
                 input_transform=None,
                 outcome_transform=outcome,
             )
+        elif kind == "saas_map":
+            from botorch.models.map_saas import get_map_saas_model
+
+            train_x = xi if scaling and str(scaling).strip().lower() == "standardize" else tX
+            m = get_map_saas_model(
+                xi,
+                yi,
+                train_Yvar=yvar_i,
+                input_transform=_input_transform(train_x, bounds, scaling),
+                outcome_transform=outcome,
+            )
+        elif kind == "saas":
+            train_x = xi if scaling and str(scaling).strip().lower() == "standardize" else tX
+            m = _fit_saas(xi, yi, yvar_i, _input_transform(train_x, bounds, scaling), outcome, cfg)
+        elif kind == "kpls":
+            train_x = xi if scaling and str(scaling).strip().lower() == "standardize" else tX
+            m = _fit_kpls(xi, yi, yvar_i, _input_transform(train_x, bounds, scaling), outcome, cfg)
         else:
             train_x = xi if scaling and str(scaling).strip().lower() == "standardize" else tX
             m = SingleTaskGP(
@@ -227,28 +302,21 @@ def build_models(
                 input_transform=_input_transform(train_x, bounds, scaling),
                 outcome_transform=outcome,
             )
-        try:
-            cfg_gp = {}
-            if hasattr(cfg, "gp_config") and cfg.gp_config:
-                cfg_gp = dict(cfg.gp_config)
-            elif hasattr(cfg, "advanced") and cfg.advanced and isinstance(cfg.advanced, dict):
-                cfg_gp = dict(cfg.advanced.get("gp", {}))
-            if cfg_gp:
-                _apply_gp_hint_priors(m, cfg_gp, tX)
-        except Exception:
-            pass
-        mll = ExactMarginalLogLikelihood(m.likelihood, m)
-        fit_gpytorch_mll(mll)
-        try:
-            cfg_gp = {}
-            if hasattr(cfg, "gp_config") and cfg.gp_config:
-                cfg_gp = dict(cfg.gp_config)
-            elif hasattr(cfg, "advanced") and cfg.advanced and isinstance(cfg.advanced, dict):
-                cfg_gp = dict(cfg.advanced.get("gp", {}))
-            if cfg_gp:
-                _freeze_gp_hypers_post_fit(m, cfg_gp, tX)
-        except Exception:
-            pass
+        if kind != "saas":
+            try:
+                cfg_gp = _gp_settings(cfg)
+                if cfg_gp:
+                    _apply_gp_hint_priors(m, cfg_gp, tX)
+            except Exception:
+                pass
+            mll = ExactMarginalLogLikelihood(m.likelihood, m)
+            fit_gpytorch_mll(mll)
+            try:
+                cfg_gp = _gp_settings(cfg)
+                if cfg_gp:
+                    _freeze_gp_hypers_post_fit(m, cfg_gp, tX)
+            except Exception:
+                pass
         models.append(m)
     if feasibility is not None:
         labels = feasibility.reshape(-1).to(dtype=tX.dtype, device=tX.device)

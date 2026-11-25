@@ -266,7 +266,12 @@ def _run_optimization_locked(
     if pca_in_x:
         from botorch.models import ModelListGP
 
-        from .pca_model import PcaObservationModel, off_subspace_residual, reconstruct_from_scores
+        from .pca_model import (
+            PcaObservationModel,
+            latent_box_inequalities,
+            off_subspace_residual,
+            pull_toward_subspace,
+        )
 
         components_t = torch.tensor(np.asarray(pca.components_), dtype=tdtype, device=tdevice)
         mean_t = torch.tensor(np.asarray(pca.mean_), dtype=tdtype, device=tdevice)
@@ -281,9 +286,25 @@ def _run_optimization_locked(
         acq_train = torch.tensor(X_np, dtype=tdtype, device=tdevice)
         acq_use_pca = False
         acq_pca = None
+        score_box = latent_box_inequalities(
+            np.asarray(pca.components_),
+            np.asarray(pca.mean_),
+            np.asarray(pc_mins),
+            np.asarray(pc_range),
+            margin,
+            dtype=tdtype,
+            device=tdevice,
+        )
+        trust = getattr(cfg, "pca_trust", "training")
         scale = getattr(pca, "scaler_scale_", None)
         scaler_center = getattr(pca, "scaler_mean_", None)
-        if scale is not None and scaler_center is not None:
+        if isinstance(trust, str) and trust.strip().lower() == "none":
+            subspace_cap = None
+        elif not isinstance(trust, str):
+            subspace_cap = max(float(trust), 0.0)
+        elif scale is None or scaler_center is None:
+            subspace_cap = None
+        else:
             trained_residual = off_subspace_residual(
                 X_np,
                 np.asarray(pca.components_),
@@ -292,9 +313,8 @@ def _run_optimization_locked(
                 np.asarray(scale),
             )
             subspace_cap = max(float(np.max(trained_residual)), 1e-8)
-        else:
-            subspace_cap = None
     else:
+        score_box = None
         subspace_cap = None
 
     pending_raw = dataset.get("pending_X", dataset.get("X_pending")) if isinstance(dataset, dict) else None
@@ -310,6 +330,27 @@ def _run_optimization_locked(
 
     from .acquisition import select_candidates_multiobjective, select_candidates_single_objective
 
+    route_name = str(getattr(cfg, "route", "direct") or "direct").strip().lower()
+    trust_region_state = None
+    if route_name == "trust_region":
+        from .trust_region import replay_trust_region
+
+        gp_cfg = dict(getattr(cfg, "gp_config", None) or {})
+        tr_kwargs = {
+            arg: gp_cfg[key]
+            for key, arg in (
+                ("tr_length_init", "length_init"),
+                ("tr_length_min", "length_min"),
+                ("tr_length_max", "length_max"),
+                ("tr_success_tolerance", "success_tolerance"),
+                ("tr_failure_tolerance", "failure_tolerance"),
+            )
+            if gp_cfg.get(key) is not None
+        }
+        trust_region_state = replay_trust_region(X_np, Y_np, _parameter_bounds(params), signs, **tr_kwargs)
+        box = torch.tensor(trust_region_state["bounds"], dtype=tdtype, device=tdevice).T.contiguous()
+        acq_bounds = box
+
     scoring_supplied = explain_rows is not None
     if scoring_supplied:
         rows = np.asarray(explain_rows, dtype=float)
@@ -319,6 +360,10 @@ def _run_optimization_locked(
             rows = input_to_z_norm(pca, pc_mins, pc_range, rows)
         cand = torch.tensor(np.atleast_2d(rows), dtype=tdtype, device=tdevice)
         num = int(cand.shape[0])
+    elif route_name == "trust_region" and n_obj == 1 and num > 8:
+        from .trust_region import thompson_candidates
+
+        cand = thompson_candidates(acq_model, acq_bounds, num, int(rng_seed))
     elif n_obj == 1:
         cand = select_candidates_single_objective(
             model=acq_model,
@@ -338,6 +383,7 @@ def _run_optimization_locked(
             train_X=acq_train,
             X_pending=x_pending,
             return_model_space=use_ilr,
+            optional_ineq=score_box,
         )
     else:
         cand = select_candidates_multiobjective(
@@ -359,6 +405,7 @@ def _run_optimization_locked(
             train_X=acq_train,
             X_pending=x_pending,
             return_model_space=use_ilr,
+            optional_ineq=score_box,
         )
 
     preds: list[dict[str, Any]] = []
@@ -399,40 +446,37 @@ def _run_optimization_locked(
         encoded = None
         encoded_actual = None
         residual = None
-        if pca_in_x:
-            raw = requested.detach().cpu().numpy().reshape(-1)
-            if subspace_cap is not None:
-                loadings = np.asarray(pca.components_)
-                center = np.asarray(pca.mean_)
-                scores = (raw - center) @ loadings.T
-                z_norm = (scores - np.asarray(pc_mins)) / np.asarray(pc_range)
-                z_norm = np.clip(z_norm, -margin, 1.0 + margin)
-                scores = z_norm * np.asarray(pc_range) + np.asarray(pc_mins)
-                raw = reconstruct_from_scores(
-                    scores,
-                    loadings,
-                    center,
-                    np.asarray(pca.scaler_mean_),
-                    np.asarray(pca.scaler_scale_),
-                ).reshape(-1)
-            x_vec, candidate_feasible, cand_dict = _original_recipe(raw)
-            residual = None
-            if subspace_cap is not None:
-                for _ in range(8):
-                    residual = float(
-                        off_subspace_residual(
-                            x_vec,
-                            np.asarray(pca.components_),
-                            np.asarray(pca.mean_),
-                            np.asarray(pca.scaler_mean_),
-                            np.asarray(pca.scaler_scale_),
-                        )[0]
-                    )
-                    if residual <= subspace_cap * (1.0 + 1e-4) + 1e-8:
-                        break
-                    anchor = X_np[int(np.argmin(np.linalg.norm(X_np - x_vec, axis=1)))]
-                    mixed = 0.5 * np.asarray(x_vec) + 0.5 * anchor
-                    x_vec, candidate_feasible, cand_dict = _original_recipe(mixed)
+        violations: list[str] | None = None
+        if scoring_supplied:
+            from .project import feasibility_violations
+
+            x_vec = np.asarray(explain_rows[i], dtype=float).reshape(-1)
+            violations = feasibility_violations(x_vec, search_bounds, groups, ratios)
+            candidate_feasible = not violations
+            cand_dict = {}
+            for j, param in enumerate(params):
+                name = str(param["name"])
+                kind = param.get("type", "float")
+                if kind == "categorical":
+                    choices = list(param.get("choices") or [])
+                    level = int(round(float(x_vec[j])))
+                    cand_dict[name] = choices[level] if 0 <= level < len(choices) else float(x_vec[j])
+                elif kind == "int":
+                    cand_dict[name] = int(round(float(x_vec[j])))
+                else:
+                    cand_dict[name] = float(x_vec[j])
+            if pca_in_x:
+                latent_model = acq_model.models[0] if hasattr(acq_model, "models") else acq_model
+                z_actual = (
+                    latent_model.encode(torch.tensor(x_vec.reshape(1, -1), dtype=tdtype, device=tdevice))
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .reshape(-1)
+                )
+                encoded = z_actual.tolist()
+                encoded_actual = z_actual.tolist()
+                x_model = torch.tensor(z_actual.reshape(1, -1), dtype=tdtype, device=tdevice)
                 residual = float(
                     off_subspace_residual(
                         x_vec,
@@ -442,6 +486,52 @@ def _run_optimization_locked(
                         np.asarray(pca.scaler_scale_),
                     )[0]
                 )
+            elif use_ilr and encoder is not None:
+                z_actual = encoder.forward(x_vec).reshape(-1)
+                encoded = z_actual.tolist()
+                encoded_actual = z_actual.tolist()
+                x_model = torch.tensor(z_actual.reshape(1, -1), dtype=tdtype, device=tdevice)
+            elif use_pca_model and pca is not None:
+                from .preprocess import input_to_z_norm as _to_z
+
+                z_actual = _to_z(pca, pc_mins, pc_range, x_vec.reshape(1, -1)).reshape(-1)
+                encoded = z_actual.tolist()
+                encoded_actual = z_actual.tolist()
+                x_model = torch.tensor(np.asarray(z_actual, dtype=float).reshape(1, -1), dtype=tdtype, device=tdevice)
+            else:
+                x_model = torch.tensor(x_vec.reshape(1, -1), dtype=tdtype, device=tdevice)
+        elif pca_in_x:
+            raw = requested.detach().cpu().numpy().reshape(-1)
+            x_vec, candidate_feasible, cand_dict = _original_recipe(raw)
+            if subspace_cap is not None:
+                residual = float(
+                    off_subspace_residual(
+                        x_vec,
+                        np.asarray(pca.components_),
+                        np.asarray(pca.mean_),
+                        np.asarray(pca.scaler_mean_),
+                        np.asarray(pca.scaler_scale_),
+                    )[0]
+                )
+                if residual > subspace_cap * (1.0 + 1e-4) + 1e-8:
+                    pulled = pull_toward_subspace(
+                        x_vec,
+                        np.asarray(pca.components_),
+                        np.asarray(pca.mean_),
+                        np.asarray(pca.scaler_mean_),
+                        np.asarray(pca.scaler_scale_),
+                        subspace_cap,
+                    ).reshape(-1)
+                    x_vec, candidate_feasible, cand_dict = _original_recipe(pulled)
+                    residual = float(
+                        off_subspace_residual(
+                            x_vec,
+                            np.asarray(pca.components_),
+                            np.asarray(pca.mean_),
+                            np.asarray(pca.scaler_mean_),
+                            np.asarray(pca.scaler_scale_),
+                        )[0]
+                    )
             latent_model = acq_model.models[0] if hasattr(acq_model, "models") else acq_model
             z_actual = (
                 latent_model.encode(torch.tensor(x_vec.reshape(1, -1), dtype=tdtype, device=tdevice))
@@ -505,6 +595,9 @@ def _run_optimization_locked(
         }
         if residual is not None:
             pred_item["off_subspace_residual"] = residual
+        if violations is not None:
+            pred_item["supplied_feasible"] = bool(candidate_feasible)
+            pred_item["violations"] = violations
         if encoded is not None:
             pred_item["encoded"] = encoded
             pred_item["encoded_actual"] = encoded_actual
@@ -561,17 +654,20 @@ def _run_optimization_locked(
         encoder=encoder,
     )
     sensitive_names = [item["parameter"] for item in sensitivities.get("parameters", [])]
+    finite_train = np.isfinite(X_np).all(axis=1) & np.isfinite(Y_np).all(axis=1)
+    train_index = np.flatnonzero(finite_train)
     for pred, recipe in zip(preds, explained_x, strict=True):
         pred["explanation"] = explain_prediction(
             means=pred["objectives"],
             variances=pred["variances"],
             recipe=recipe,
-            trained_x=X_np,
-            trained_y=Y_np,
+            trained_x=X_np[train_index],
+            trained_y=Y_np[train_index],
             bounds=search_bounds,
             objective_names=obj_names,
             goals=goals,
             sensitive=sensitive_names,
+            row_index=train_index,
         )
 
     pareto_idx = _pareto_front([p["objectives"] for p in preds], minimize_frame=-signs)
@@ -617,12 +713,29 @@ def _run_optimization_locked(
         "feasibility_model": prepared["feasibility"] is not None,
         "mixed_model": bool(use_mixed),
         "mixture_transform": "ilr" if use_ilr else "none",
+        "model": str(getattr(cfg, "model", "gp") or "gp").strip().lower(),
+        "route": str(getattr(cfg, "route", "direct") or "direct").strip().lower(),
         "pca_search": "x" if pca_in_x else "none",
         "bounds_clipped": int(n_clipped),
         "objective_names": obj_names,
         "sator_version": sator_version,
         "botorch_version": botorch_version,
     }
+    if diagnostics["model"] == "kpls":
+        kpls_report: dict[str, Any] = {}
+        for name, submodel in zip(obj_names, model.models, strict=False):
+            weights = getattr(submodel, "kpls_weights", None)
+            if weights is None:
+                continue
+            magnitude = np.abs(weights.detach().cpu().numpy()).sum(axis=1)
+            order = np.argsort(-magnitude)
+            kpls_report[name] = {
+                "k": int(weights.shape[-1]),
+                "parameters": [feature_names[int(i)] for i in order],
+            }
+        diagnostics["kpls"] = kpls_report
+    if trust_region_state is not None:
+        diagnostics["trust_region"] = trust_region_state
     if enforcement_diag is not None:
         diagnostics["enforcement"] = enforcement_diag
     response: dict[str, Any] = {

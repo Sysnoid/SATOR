@@ -5,6 +5,27 @@ from __future__ import annotations
 from typing import Any
 
 
+def run_explain_payload(payload: dict[str, Any], device: str, cuda_device: int) -> dict[str, Any]:
+    import numpy as np
+
+    from ..core.models.explain import ExplainRequest
+    from ..core.models.optimize import OptimizeRequest
+    from ..core.optimizer.mobo_engine import run_optimization
+    from ..core.optimizer.space import encode_value
+
+    body = ExplainRequest.model_validate(payload)
+    params = list(body.search_space.get("parameters") or [])
+    rows = [[encode_value(candidate[str(param["name"])], param) for param in params] for candidate in body.candidates]
+    request = OptimizeRequest(
+        dataset=body.dataset,
+        search_space=body.search_space,
+        objectives=body.objectives,
+        constraints=body.constraints,
+        optimization_config=body.optimization_config,
+    )
+    return run_optimization(request, device=device, cuda_device=cuda_device, explain_rows=np.asarray(rows, dtype=float))
+
+
 def run_optimize_payload(payload: dict[str, Any], device: str, cuda_device: int) -> dict[str, Any]:
     from ..core.models.optimize import OptimizeRequest
     from ..core.optimizer.mobo_engine import run_optimization
@@ -114,6 +135,8 @@ def run_sleep_payload(seconds: float) -> dict[str, Any]:
 def dispatch(kind: str, args: tuple[Any, ...]) -> dict[str, Any]:
     if kind == "optimize":
         return run_optimize_payload(*args)
+    if kind == "explain":
+        return run_explain_payload(*args)
     if kind == "reconstruct":
         return run_reconstruct_payload(*args)
     if kind == "sleep":

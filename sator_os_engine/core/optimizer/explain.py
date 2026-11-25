@@ -8,6 +8,7 @@ original columns when the GP was trained in PCA or ILR coordinates.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -20,6 +21,14 @@ def _num(value: float) -> str:
     return f"{float(value):.4g}"
 
 
+def _json_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _lengthscales(submodel: Any) -> np.ndarray | None:
     kernel = getattr(submodel, "covar_module", None)
     if kernel is None:
@@ -28,7 +37,9 @@ def _lengthscales(submodel: Any) -> np.ndarray | None:
     raw = getattr(base, "lengthscale", None)
     if raw is None:
         return None
-    values = np.asarray(raw.detach().cpu().numpy(), dtype=float).reshape(-1)
+    arr = np.asarray(raw.detach().cpu().numpy(), dtype=float)
+    # Fully Bayesian SAAS stores one lengthscale row per MCMC sample.
+    values = arr if arr.ndim == 1 else np.median(arr, axis=tuple(range(arr.ndim - 1))).reshape(-1)
     if values.size == 0 or not np.isfinite(values).all():
         return None
     return values
@@ -42,6 +53,8 @@ def nearest_tested(
     """Euclidean distance in the unit search box. A categorical mismatch counts as 1."""
     row = np.asarray(recipe, dtype=float).reshape(-1)
     data = np.asarray(trained, dtype=float)
+    if data.size == 0 or row.shape[0] == 0:
+        return {"index": None, "distance": None}
     span = np.array([max(float(hi) - float(lo), 1e-9) for lo, hi in bounds], dtype=float)
     distance = np.linalg.norm((data - row) / span, axis=1)
     index = int(np.argmin(distance))
@@ -98,20 +111,27 @@ def parameter_sensitivity(
     for index, (name, submodel) in enumerate(zip(names, submodels, strict=False)):
         if index >= n_obj:
             break
-        lengthscale = _lengthscales(submodel)
-        if lengthscale is None:
-            continue
-        if space == "pca" and components is not None:
-            scores = _pca_scores(lengthscale, components)
+        weights = getattr(submodel, "kpls_weights", None)
+        if weights is not None:
+            matrix = np.abs(np.asarray(weights.detach().cpu().numpy(), dtype=float))
+            scores = matrix.sum(axis=1) if matrix.ndim == 2 else matrix.reshape(-1)
             per_input = None
-        elif space == "ilr" and encoder is not None:
-            scores = _ilr_scores(lengthscale, encoder)
-            per_input = None
-        elif lengthscale.shape[0] == len(names):
-            scores = _input_scores(lengthscale)
-            per_input = lengthscale
+            lengthscale = None
         else:
-            continue
+            lengthscale = _lengthscales(submodel)
+            if lengthscale is None:
+                continue
+            if space == "pca" and components is not None:
+                scores = _pca_scores(lengthscale, components)
+                per_input = None
+            elif space == "ilr" and encoder is not None:
+                scores = _ilr_scores(lengthscale, encoder)
+                per_input = None
+            elif lengthscale.shape[0] == len(names):
+                scores = _input_scores(lengthscale)
+                per_input = lengthscale
+            else:
+                continue
         if scores.shape[0] != len(names):
             continue
         accumulated.append(scores)
@@ -166,19 +186,28 @@ def explain_prediction(
     objective_names: list[str],
     goals: list[str],
     sensitive: list[str],
+    row_index: np.ndarray | None = None,
 ) -> dict[str, Any]:
     nearest = nearest_tested(recipe, trained_x, bounds)
-    nearest_y = trained_y[nearest["index"]]
+    position = nearest["index"]
+    if position is None or trained_y.size == 0:
+        nearest_y = np.array([])
+        reported_index = None
+        distance = None
+    else:
+        nearest_y = trained_y[position]
+        reported_index = int(row_index[position]) if row_index is not None else int(position)
+        distance = nearest["distance"]
     objectives = []
     clauses = []
     improvements: list[bool | None] = []
     for index, name in enumerate(objective_names):
-        mean = float(means[index])
-        sd = float(np.sqrt(max(variances[index], 0.0)))
+        mean = _json_float(means[index]) if index < len(means) else None
+        sd = _json_float(np.sqrt(max(variances[index], 0.0))) if index < len(variances) else None
         goal = goals[index] if index < len(goals) else "min"
         column = trained_y[:, index] if trained_y.ndim > 1 else trained_y
-        best = _best_tested(np.asarray(column, dtype=float), goal)
-        better = _improves(mean, best, goal)
+        best = _best_tested(np.asarray(column, dtype=float), goal) if trained_y.size else None
+        better = _improves(mean, best, goal) if mean is not None else None
         improvements.append(better)
         objectives.append(
             {
@@ -189,26 +218,31 @@ def explain_prediction(
                 "better_than_best": better,
             }
         )
-        if better is True:
+        if better is True and mean is not None and best is not None and sd is not None:
             clauses.append(f"{name} {_num(mean)} ± {_num(sd)}, improving on the best tested {_num(best)}")
-        elif better is False and best is not None:
+        elif better is False and best is not None and mean is not None and sd is not None:
             clauses.append(f"{name} {_num(mean)} ± {_num(sd)}, short of the best tested {_num(best)}")
-        else:
+        elif mean is not None and sd is not None:
             clauses.append(f"{name} {_num(mean)} ± {_num(sd)}")
-    distance = float(nearest["distance"])
-    novel = distance > 0.35
+        else:
+            clauses.append(f"{name} is unavailable")
+    distance_value = None if distance is None else _json_float(distance)
+    novel = distance_value is not None and distance_value > 0.35
     if len(objective_names) > 1:
         role = "explore" if novel else "tradeoff"
     elif improvements and improvements[0] is True and not novel:
         role = "exploit"
     else:
         role = "explore"
-    if novel:
+    if novel and distance_value is not None:
         place = (
-            f"The nearest tested recipe is {_num(distance)} search-box lengths away, so this step leaves the tested set"
+            f"The nearest tested recipe is {_num(distance_value)} search-box lengths away, "
+            "so this step leaves the tested set"
         )
+    elif distance_value is not None:
+        place = f"The nearest tested recipe is {_num(distance_value)} search-box lengths away"
     else:
-        place = f"The nearest tested recipe is {_num(distance)} search-box lengths away"
+        place = "No finite tested recipe is available for a distance"
     drivers = ""
     if sensitive:
         shown = ", ".join(sensitive[:3])
@@ -217,9 +251,9 @@ def explain_prediction(
     return {
         "objectives": objectives,
         "nearest_tested": {
-            "index": nearest["index"],
-            "distance": distance,
-            "objectives": [float(v) for v in np.asarray(nearest_y, dtype=float).reshape(-1)],
+            "index": reported_index,
+            "distance": distance_value,
+            "objectives": [_json_float(v) for v in np.asarray(nearest_y, dtype=float).reshape(-1)],
         },
         "role": role,
         "sensitive_parameters": sensitive[:3],

@@ -32,7 +32,7 @@ Every call except `/livez`, `/readyz`, and `/metrics` requires `x-api-key`.
 | `GET`  | `/readyz`                        | Readiness probe |
 | `GET`  | `/metrics`                       | Prometheus metrics *(if `SATOR_ENABLE_METRICS=true`)* |
 | `POST` | `/v1/optimize`                   | Submit an optimization job *(async)* |
-| `POST` | `/v1/explain`                    | Score supplied recipes and explain them *(sync)* |
+| `POST` | `/v1/explain`                    | Score supplied recipes and explain them *(async)* |
 | `POST` | `/v1/reconstruct`                | Submit a reconstruction job *(async)* |
 | `GET`  | `/v1/jobs/{job_id}`              | Job status |
 | `GET`  | `/v1/jobs/{job_id}/result`       | Final job result *(once `SUCCEEDED`)* |
@@ -112,6 +112,8 @@ Supported `goal` values and their extra fields are detailed in
 |---|---|---|---|
 | `acquisition` | string | `qnehvi` | `qnehvi`, `qehvi`, `qnoisyehvi`, `qlognei`, `parego`, `qei`, `qpi`, `qucb`, `sobol`, or `auto`. `auto` with `mode: lab` uses qLogNEI / qLogNEHVI. |
 | `mode` | `lab` \| `throughput` | `lab` | `lab` treats `acquisition: auto` as noisy. `throughput` keeps qLogEI / qLogEHVI unless `Yvar`, replicates, or failures are present. |
+| `model` | `gp` \| `saas_map` \| `saas` \| `kpls` | `gp` | Surrogate on the original inputs. `saas_map` is MAP-SAAS. `saas` is fully Bayesian SAAS (NUTS; `gp_config.warmup_steps` 256, `num_samples` 128, `thinning` 16). `kpls` is a Matern kernel on PLS scores, rank `gp_config.kpls_rank` (default 4). |
+| `route` | `direct` \| `trust_region` | `direct` | `trust_region` replays a TuRBO box from the ordered dataset and searches inside it. The box is in `diagnostics.trust_region`. |
 | `batch_size` | int 1–16 | `4` | Number of candidates returned per request. |
 | `max_evaluations` | int ≥ 1 | `100` | Accepted for compatibility. The acquisition loop uses `advanced.acq_maxiter` (default 200). |
 | `seed` | int | — | RNG seed. Omitted seeds are drawn at random and returned in `diagnostics.seed`. |
@@ -354,7 +356,7 @@ All error responses share the shape:
 
 ## 5.7 `POST /v1/explain`
 
-Score recipes the caller already has. The body is an optimize request plus `candidates`, a list of objects keyed by parameter name. The response has the same shape as an optimize result: one prediction per candidate, each with `explanation`. `diagnostics.acquisition` is `explain`. The call is synchronous and does not propose a new batch.
+Score recipes the caller already has. The body is an optimize request plus `candidates`, a list of objects keyed by parameter name. The call returns `202` and a `job_id`, like optimize, and runs in a worker process so it does not block other requests. The job result has the same shape as an optimize result: one prediction per candidate, each with `explanation`. `diagnostics.acquisition` is `explain`. The returned `candidate` is the recipe that was sent. `supplied_feasible` is false when it breaks a bound, sum, or ratio, and `violations` names those constraints.
 
 A candidate that omits a parameter is a 422.
 

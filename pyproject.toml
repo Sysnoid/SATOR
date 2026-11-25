@@ -75,3 +75,7 @@ known-first-party = ["sator_os_engine"]
 [tool.ruff.format]
 quote-style = "double"
 docstring-code-format = true
+
+[tool.pytest.ini_options]
+markers = ["slow: production NUTS budget; excluded from the default run"]
+addopts = "-m 'not slow'"

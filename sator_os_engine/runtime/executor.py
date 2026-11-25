@@ -55,8 +55,16 @@ class Executor:
                 await self.store.fail(job_id, "Job timed out")
                 metrics.jobs_finished.labels(outcome="timeout").inc()
             elif status == "ok":
-                await self.store.complete(job_id, payload)
-                metrics.jobs_finished.labels(outcome="completed").inc()
+                from .json_safe import sanitize_for_json
+
+                try:
+                    payload = sanitize_for_json(payload)
+                except ValueError as exc:
+                    await self.store.fail(job_id, f"Job failed: {exc}")
+                    metrics.jobs_finished.labels(outcome="failed").inc()
+                else:
+                    await self.store.complete(job_id, payload)
+                    metrics.jobs_finished.labels(outcome="completed").inc()
             else:
                 await self.store.fail(job_id, f"Job failed: {payload}")
                 metrics.jobs_finished.labels(outcome="failed").inc()

@@ -27,6 +27,9 @@ class OptimizationConfig(BaseModel):
     pca_dimension: int | str | None = None
     # Expands the PCA search box from the training envelope [0, 1] to [-m, 1+m].
     pca_margin: float = Field(0.0, ge=0.0, le=2.0)
+    # training: keep candidates within the training off-subspace residual.
+    # none: do not apply that cap. A number is an explicit residual cap.
+    pca_trust: str | float = "training"
     parameter_scaling: str | None = None  # none|standardize|minmax
     value_normalization: str | None = None  # none|standardize|minmax
     target_tolerance: float | None = None
@@ -60,6 +63,10 @@ class OptimizationConfig(BaseModel):
     gp_config: dict[str, Any] | None = None
     acquisition_params: dict[str, Any] | None = None  # e.g., {"ucb_beta": 0.2, "raw_samples": 16, "ref_point": [...]}
     outputs: dict[str, Any] = Field(default_factory=dict)
+    # gp: exact ARD GP. saas_map: MAP sparse prior. saas: NUTS sparse prior. kpls: PLS kernel.
+    model: str = "gp"
+    # direct searches the full box. trust_region searches the replayed TuRBO box.
+    route: str = "direct"
 
     @model_validator(mode="after")
     def _known_names(self) -> OptimizationConfig:
@@ -94,6 +101,26 @@ class OptimizationConfig(BaseModel):
             raise ValueError("pca_dimension is required when use_pca is true")
         if isinstance(self.pca_dimension, str) and self.pca_dimension.strip().lower() != "auto":
             raise ValueError("pca_dimension must be an integer or 'auto'")
+        trust = self.pca_trust
+        if isinstance(trust, str):
+            if trust.strip().lower() not in {"training", "none"}:
+                raise ValueError("pca_trust must be 'training', 'none', or a non-negative number")
+        elif float(trust) < 0.0:
+            raise ValueError("pca_trust must be 'training', 'none', or a non-negative number")
+        model_name = str(self.model or "gp").strip().lower()
+        route_name = str(self.route or "direct").strip().lower()
+        self.model = model_name
+        self.route = route_name
+        if model_name not in {"gp", "saas_map", "saas", "kpls"}:
+            raise ValueError("model must be 'gp', 'saas_map', 'saas', or 'kpls'")
+        if route_name not in {"direct", "trust_region"}:
+            raise ValueError("route must be 'direct' or 'trust_region'")
+        if model_name in {"saas", "saas_map", "kpls"} and self.use_pca:
+            raise ValueError(f"model {model_name!r} cannot be combined with use_pca")
+        if model_name in {"saas", "saas_map"} and transform == "ilr":
+            raise ValueError(f"model {model_name!r} cannot be combined with mixture_transform 'ilr'")
+        if route_name == "trust_region" and self.use_pca:
+            raise ValueError("route 'trust_region' cannot be combined with use_pca")
         return self
 
 
@@ -116,6 +143,9 @@ class OptimizeRequest(BaseModel):
         transform = str(self.optimization_config.mixture_transform or "none").lower()
         if transform == "ilr" and any(str(p.get("type", "float")) == "categorical" for p in params):
             raise ValueError("mixture_transform 'ilr' does not support categorical parameters")
+        model_name = str(self.optimization_config.model or "gp").strip().lower()
+        if model_name in {"saas", "saas_map"} and any(str(p.get("type", "float")) == "categorical" for p in params):
+            raise ValueError(f"model {model_name!r} does not support categorical parameters")
         if not isinstance(self.objectives, dict) or not self.objectives:
             raise ValueError("objectives must be a non-empty object")
         for name, cfg in self.objectives.items():

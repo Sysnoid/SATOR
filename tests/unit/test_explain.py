@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -66,9 +68,25 @@ def test_explain_endpoint_scores_the_supplied_recipe(monkeypatch):
         payload["candidates"] = [{"x1": 0.25, "x2": 0.75}]
         app = create_app(Settings())
         with TestClient(app) as client:
+            started = time.perf_counter()
             response = client.post("/v1/explain", json=payload, headers={"x-api-key": "test-key"})
-        assert response.status_code == 200, response.text
-        body = response.json()
+            assert time.perf_counter() - started < 1.0
+            assert response.status_code == 202, response.text
+            job_id = response.json()["job_id"]
+            body = None
+            last = None
+            for _ in range(60):
+                live = client.get("/livez")
+                assert live.status_code == 200
+                result = client.get(f"/v1/jobs/{job_id}/result", headers={"x-api-key": "test-key"})
+                last = result.json()
+                if result.status_code == 200 and "predictions" in last:
+                    body = last
+                    break
+                if last.get("status") == "FAILED":
+                    break
+                time.sleep(0.5)
+        assert body is not None, last
         assert body["diagnostics"]["acquisition"] == "explain"
         candidate = body["predictions"][0]["candidate"]
         assert candidate["x1"] == pytest.approx(0.25, abs=1e-6)

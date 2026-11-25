@@ -237,26 +237,32 @@ def _is_directional(goal: str, cfg: dict[str, Any]) -> bool:
     return g in THRESHOLD_GOALS and not _has_threshold(g, cfg)
 
 
-def _optimizer_controls(req: Any, *, q: int, n_obj: int, name: str, constrained: bool = False) -> dict[str, Any]:
+def _optimizer_controls(
+    req: Any, *, q: int, n_obj: int, name: str, constrained: bool = False, d: int | None = None
+) -> dict[str, Any]:
     ap = _acquisition_params(req)
     adv = _advanced(req)
     num_restarts = int(ap.get("num_restarts", adv.get("num_restarts", 8)))
     raw_samples = int(ap.get("raw_samples", adv.get("raw_samples", 256)))
-    # Joint 3-objective batches dominate the wall clock. A smaller start set
-    # keeps q=4 inside a small multiple of the q=1 time unless the caller set
-    # the budget explicitly. Constrained batches stay on the full budget.
-    if not constrained and n_obj >= 3 and q > 1 and "num_restarts" not in ap and "num_restarts" not in adv:
+    # Three-objective batches, constrained or not, use a smaller start set
+    # after the policy below has chosen joint or sequential mode.
+    if n_obj >= 3 and q > 1 and "num_restarts" not in ap and "num_restarts" not in adv:
         num_restarts = min(num_restarts, 4)
-    if not constrained and n_obj >= 3 and q > 1 and "raw_samples" not in ap and "raw_samples" not in adv:
+    if n_obj >= 3 and q > 1 and "raw_samples" not in ap and "raw_samples" not in adv:
         raw_samples = min(raw_samples, 128)
     maxiter = int(ap.get("acq_maxiter", adv.get("acq_maxiter", adv.get("maxiter", 200))))
     batch_limit = int(ap.get("batch_limit", adv.get("batch_limit", 5)))
-    # A joint q-batch ignores outcome constraints. One-at-a-time selection
-    # respects them. An explicit sequential flag still wins.
-    if constrained and "sequential" not in ap and "sequential" not in adv:
+    # Joint batches lose hypervolume on two objectives and ignore outcome
+    # constraints. Unconstrained three-objective batches stay joint: that is
+    # the case where a sequential EHVI becomes much slower. An explicit flag wins.
+    if "sequential" in ap or "sequential" in adv:
+        sequential = bool(ap.get("sequential", adv.get("sequential", False)))
+    elif not constrained and n_obj >= 3:
+        sequential = False
+    elif n_obj <= 2 or (q <= 4 and d is not None and d <= 10):
         sequential = True
     else:
-        sequential = bool(ap.get("sequential", adv.get("sequential", False)))
+        sequential = bool(constrained)
     return {
         "num_restarts": max(1, num_restarts),
         "raw_samples": max(1, raw_samples),
@@ -298,30 +304,42 @@ def _optimize_acquisition(
     controls: dict[str, Any],
     inequality: list[Any] | None,
     fixed_features: list[dict[int, float]] | None,
+    optional_inequality: list[Any] | None = None,
 ) -> torch.Tensor:
-    if fixed_features:
-        cand, _ = optimize_acqf_mixed(
+    from botorch.exceptions.errors import InfeasibilityError
+
+    def _run(ineq: list[Any] | None) -> torch.Tensor:
+        if fixed_features:
+            cand, _ = optimize_acqf_mixed(
+                acqf,
+                bounds=bounds,
+                q=q,
+                num_restarts=controls["num_restarts"],
+                fixed_features_list=fixed_features,
+                raw_samples=controls["raw_samples"],
+                options=controls["options"],
+                inequality_constraints=ineq,
+            )
+            return cand
+        cand, _ = optimize_acqf(
             acqf,
             bounds=bounds,
             q=q,
             num_restarts=controls["num_restarts"],
-            fixed_features_list=fixed_features,
             raw_samples=controls["raw_samples"],
+            inequality_constraints=ineq,
             options=controls["options"],
-            inequality_constraints=inequality,
+            sequential=controls["sequential"],
         )
         return cand
-    cand, _ = optimize_acqf(
-        acqf,
-        bounds=bounds,
-        q=q,
-        num_restarts=controls["num_restarts"],
-        raw_samples=controls["raw_samples"],
-        inequality_constraints=inequality,
-        options=controls["options"],
-        sequential=controls["sequential"],
-    )
-    return cand
+
+    merged = (inequality or []) + list(optional_inequality or [])
+    try:
+        return _run(merged or None)
+    except InfeasibilityError:
+        if not optional_inequality:
+            raise
+        return _run(inequality)
 
 
 def _reference_point(tY: torch.Tensor, req: Any, signs: np.ndarray) -> torch.Tensor:
@@ -712,6 +730,7 @@ def select_candidates_single_objective(
     train_X: torch.Tensor | None = None,
     X_pending: torch.Tensor | None = None,
     return_model_space: bool = False,
+    optional_ineq: list[Any] | None = None,
 ) -> torch.Tensor:
     # Coerce bounds to tensors if lists were passed
     if not hasattr(bounds_input, "shape"):
@@ -768,12 +787,12 @@ def select_candidates_single_objective(
         d_m = int(bounds_model.shape[1])
         ineq = _linear_inequality_for_botorch(req, params, use_pca_model, d_m, tdevice, tdtype)
         controls = _optimizer_controls(
-            req, q=n, n_obj=1, name=name if not constrained else "qlogei", constrained=constrained
+            req, q=n, n_obj=1, name=name if not constrained else "qlogei", constrained=constrained, d=d_m
         )
         fixed = None if return_model_space or use_pca_model else _categorical_fixed_features(params, d_m)
         with optimization_lock, torch.random.fork_rng():
             torch.manual_seed(seed)
-            cand = _optimize_acquisition(acqf, bounds_model, n, controls, ineq, fixed)
+            cand = _optimize_acquisition(acqf, bounds_model, n, controls, ineq, fixed, optional_ineq)
         cand_np = cand.detach().cpu().numpy()
         cand_np = _swap_infeasible_candidates(cand_np, model, 1, bounds_model, seed)
         cand_np = _swap_constraint_violations(
@@ -938,6 +957,7 @@ def select_candidates_multiobjective(
     train_X: torch.Tensor,
     X_pending: torch.Tensor | None = None,
     return_model_space: bool = False,
+    optional_ineq: list[Any] | None = None,
 ) -> torch.Tensor:
     # Coerce bounds to tensors if lists were passed
     if not hasattr(bounds_input, "shape"):
@@ -978,7 +998,7 @@ def select_candidates_multiobjective(
         acqf: Any
         if name in ("qehvi", "ehvi") and not constrained and mo_objective is None:
             acqf = qExpectedHypervolumeImprovement(model=acqf_model, ref_point=rp.tolist(), partitioning=part)
-        elif name in _NOISY_MO or mo_objective is not None:
+        elif name in _NOISY_MO or mo_objective is not None or (constrained and len(goal_names) >= 3 and n > 1):
             acqf = qLogNoisyExpectedHypervolumeImprovement(
                 model=acqf_model,
                 ref_point=rp.tolist(),
@@ -1020,11 +1040,11 @@ def select_candidates_multiobjective(
             acqf = qLogExpectedHypervolumeImprovement(
                 model=model, ref_point=rp.tolist(), partitioning=part, constraints=cons, X_pending=pending
             )
-        controls = _optimizer_controls(req, q=n, n_obj=len(goal_names), name=name, constrained=constrained)
+        controls = _optimizer_controls(req, q=n, n_obj=len(goal_names), name=name, constrained=constrained, d=d_model)
         fixed = None if return_model_space or use_pca_model else _categorical_fixed_features(params, d_model)
         with optimization_lock, torch.random.fork_rng():
             torch.manual_seed(seed)
-            cand = _optimize_acquisition(acqf, bounds_model, n, controls, botorch_ineq, fixed)
+            cand = _optimize_acquisition(acqf, bounds_model, n, controls, botorch_ineq, fixed, optional_ineq)
         cand_np = cand.detach().cpu().numpy()
         cand_np = _swap_infeasible_candidates(cand_np, model, len(goal_names), bounds_model, seed)
         cand_np = _swap_constraint_violations(cand_np, model, cfgs, signs, bounds_model, seed)

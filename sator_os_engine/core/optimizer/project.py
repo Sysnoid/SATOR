@@ -90,6 +90,52 @@ def is_feasible(
     return True
 
 
+def feasibility_violations(
+    x: np.ndarray,
+    bounds: list[tuple[float, float]],
+    sum_groups: list[dict[str, Any]] | None = None,
+    ratio_constraints: list[dict[str, Any]] | None = None,
+    atol: float = _FEAS_ATOL,
+) -> list[str]:
+    """Names of the bounds, sums and ratios a recipe breaks. Empty means feasible."""
+    v = np.asarray(x, dtype=float).reshape(-1)
+    messages: list[str] = []
+    if v.shape[0] != len(bounds):
+        return [f"width {v.shape[0]} does not match {len(bounds)} parameters"]
+    for index, (lo, hi) in enumerate(bounds):
+        if v[index] < float(lo) - atol:
+            messages.append(f"bounds[{index}] {v[index]:.6g} is below {lo}")
+        elif v[index] > float(hi) + atol:
+            messages.append(f"bounds[{index}] {v[index]:.6g} is above {hi}")
+    for group in sum_groups or []:
+        idxs = [int(i) for i in group.get("indices", []) if 0 <= int(i) < v.shape[0]]
+        if not idxs:
+            continue
+        target = float(group.get("target", group.get("target_sum", 1.0)))
+        total = float(np.sum(v[idxs]))
+        if abs(total - target) > atol:
+            messages.append(f"sum {idxs} is {total:.6g}, target {target}")
+    for rc in ratio_constraints or []:
+        try:
+            i = int(rc.get("i", -1))
+            j = int(rc.get("j", -1))
+        except (TypeError, ValueError):
+            continue
+        if i < 0 or j < 0 or i == j or i >= v.shape[0] or j >= v.shape[0]:
+            continue
+        floor = ratio_min_denominator(rc)
+        if floor is not None and float(v[j]) + atol < floor:
+            messages.append(f"ratio denominator x[{j}] is {v[j]:.6g}, minimum {floor}")
+            continue
+        denom = max(float(v[j]), 1e-12)
+        ratio = float(v[i]) / denom
+        if rc.get("min_ratio") is not None and ratio < float(rc["min_ratio"]) - atol:
+            messages.append(f"ratio x[{i}]/x[{j}] is {ratio:.6g}, minimum {rc['min_ratio']}")
+        if rc.get("max_ratio") is not None and ratio > float(rc["max_ratio"]) + atol:
+            messages.append(f"ratio x[{i}]/x[{j}] is {ratio:.6g}, maximum {rc['max_ratio']}")
+    return messages
+
+
 def project_to_feasible(
     x_hat: np.ndarray,
     bounds: list[tuple[float, float]],
