@@ -51,8 +51,8 @@ def test_build_linear_constraints_sum_and_ratio():
 
     # No equality constraints expected in current implementation
     assert isinstance(eqpairs, list) and len(eqpairs) == 0
-    # Expect 2 from sum (± target), and 2 from ratio (min and max) => total 4
-    assert isinstance(ineq, list) and len(ineq) == 4
+    # Expect 2 from sum (± target), 2 from the ratio, and 1 denominator floor.
+    assert isinstance(ineq, list) and len(ineq) == 5
 
     # Helper to find a constraint (indices, coeffs, rhs) regardless of ordering
     def has_constraint(target_idxs, target_coeffs, target_rhs):
@@ -71,6 +71,8 @@ def test_build_linear_constraints_sum_and_ratio():
     assert has_constraint([0, 2], [-1.0, 2.0], 0.0)
     # a/c >= 0.5  =>  a - 0.5*c >= 0
     assert has_constraint([0, 2], [1.0, -0.5], 0.0)
+    # A declared ratio keeps the denominator off zero.
+    assert has_constraint([2], [1.0], 1e-4)
 
 
 def test_feasible_mask_sum_and_ratio():

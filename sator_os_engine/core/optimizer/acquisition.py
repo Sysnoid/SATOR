@@ -237,14 +237,26 @@ def _is_directional(goal: str, cfg: dict[str, Any]) -> bool:
     return g in THRESHOLD_GOALS and not _has_threshold(g, cfg)
 
 
-def _optimizer_controls(req: Any, *, q: int, n_obj: int, name: str) -> dict[str, Any]:
+def _optimizer_controls(req: Any, *, q: int, n_obj: int, name: str, constrained: bool = False) -> dict[str, Any]:
     ap = _acquisition_params(req)
     adv = _advanced(req)
     num_restarts = int(ap.get("num_restarts", adv.get("num_restarts", 8)))
     raw_samples = int(ap.get("raw_samples", adv.get("raw_samples", 256)))
+    # Joint 3-objective batches dominate the wall clock. A smaller start set
+    # keeps q=4 inside a small multiple of the q=1 time unless the caller set
+    # the budget explicitly. Constrained batches stay on the full budget.
+    if not constrained and n_obj >= 3 and q > 1 and "num_restarts" not in ap and "num_restarts" not in adv:
+        num_restarts = min(num_restarts, 4)
+    if not constrained and n_obj >= 3 and q > 1 and "raw_samples" not in ap and "raw_samples" not in adv:
+        raw_samples = min(raw_samples, 128)
     maxiter = int(ap.get("acq_maxiter", adv.get("acq_maxiter", adv.get("maxiter", 200))))
     batch_limit = int(ap.get("batch_limit", adv.get("batch_limit", 5)))
-    sequential = bool(ap.get("sequential", adv.get("sequential", False)))
+    # A joint q-batch ignores outcome constraints. One-at-a-time selection
+    # respects them. An explicit sequential flag still wins.
+    if constrained and "sequential" not in ap and "sequential" not in adv:
+        sequential = True
+    else:
+        sequential = bool(ap.get("sequential", adv.get("sequential", False)))
     return {
         "num_restarts": max(1, num_restarts),
         "raw_samples": max(1, raw_samples),
@@ -397,6 +409,69 @@ def _swap_infeasible_candidates(
     for i in range(out.shape[0]):
         if feas_mean[i] < 0.5:
             out[i] = ranked[min(fill, ranked.shape[0] - 1)]
+            fill += 1
+    return out
+
+
+def _swap_constraint_violations(
+    cand_np: np.ndarray,
+    model: Any,
+    cfgs: list[dict[str, Any]],
+    signs: np.ndarray,
+    bounds: Any,
+    seed: int,
+) -> np.ndarray:
+    """Replace candidates whose posterior mean is on the infeasible side of a bound.
+
+    For a symmetric posterior, P(feasible) < 0.5 exactly when the mean violates
+    the threshold or outcome constraint. The replacement comes from a Sobol
+    grid scored on the posterior mean.
+    """
+    specs = [_bound_specs(str(cfg.get("goal", "min")), cfg) for cfg in cfgs]
+    if not any(specs):
+        return cand_np
+    reference = next(model.parameters())
+    submodels = list(model.models) if hasattr(model, "models") else [model]
+
+    def _user_means(rows: np.ndarray) -> np.ndarray:
+        xt = torch.tensor(np.atleast_2d(rows), dtype=reference.dtype, device=reference.device)
+        columns = []
+        for index, submodel in enumerate(submodels[: len(cfgs)]):
+            signed = submodel.posterior(xt).mean.detach().cpu().numpy().reshape(-1)
+            columns.append(signed * float(signs[index]))
+        return np.column_stack(columns)
+
+    def _ok(mu: np.ndarray) -> np.ndarray:
+        good = np.ones(mu.shape[0], dtype=bool)
+        for index, bounds_i in enumerate(specs):
+            for side, level in bounds_i:
+                if side == "below":
+                    good &= mu[:, index] <= float(level) + 1e-6
+                else:
+                    good &= mu[:, index] >= float(level) - 1e-6
+        return good
+
+    mu = _user_means(cand_np)
+    feasible = _ok(mu)
+    if bool(np.all(feasible)):
+        return cand_np
+    lo, hi = _bound_arrays(bounds)
+    engine = SobolEngine(dimension=int(lo.shape[0]), scramble=True, seed=int(seed) % (2**31 - 1) or 1)
+    grid = lo + (hi - lo) * engine.draw(512).cpu().numpy()
+    grid_mu = _user_means(grid)
+    pool_ok = _ok(grid_mu)
+    if not np.any(pool_ok):
+        return cand_np
+    pool = grid[pool_ok]
+    score = np.zeros(pool.shape[0], dtype=float)
+    for index in range(len(cfgs)):
+        score += grid_mu[pool_ok, index] * float(signs[index])
+    ranked = pool[np.argsort(score)[::-1]]
+    out = np.array(cand_np, dtype=float, copy=True)
+    fill = 0
+    for index in range(out.shape[0]):
+        if not feasible[index]:
+            out[index] = ranked[min(fill, ranked.shape[0] - 1)]
             fill += 1
     return out
 
@@ -692,13 +767,18 @@ def select_candidates_single_objective(
             )
         d_m = int(bounds_model.shape[1])
         ineq = _linear_inequality_for_botorch(req, params, use_pca_model, d_m, tdevice, tdtype)
-        controls = _optimizer_controls(req, q=n, n_obj=1, name=name if not constrained else "qlogei")
+        controls = _optimizer_controls(
+            req, q=n, n_obj=1, name=name if not constrained else "qlogei", constrained=constrained
+        )
         fixed = None if return_model_space or use_pca_model else _categorical_fixed_features(params, d_m)
         with optimization_lock, torch.random.fork_rng():
             torch.manual_seed(seed)
             cand = _optimize_acquisition(acqf, bounds_model, n, controls, ineq, fixed)
         cand_np = cand.detach().cpu().numpy()
         cand_np = _swap_infeasible_candidates(cand_np, model, 1, bounds_model, seed)
+        cand_np = _swap_constraint_violations(
+            cand_np, model, [cfg0], np.array([training_sign(goal)]), bounds_model, seed
+        )
         observed = train_X.detach().cpu().numpy() if train_X is not None else None
         if pending is not None:
             pend_np = pending.detach().cpu().numpy()
@@ -940,13 +1020,14 @@ def select_candidates_multiobjective(
             acqf = qLogExpectedHypervolumeImprovement(
                 model=model, ref_point=rp.tolist(), partitioning=part, constraints=cons, X_pending=pending
             )
-        controls = _optimizer_controls(req, q=n, n_obj=len(goal_names), name=name)
+        controls = _optimizer_controls(req, q=n, n_obj=len(goal_names), name=name, constrained=constrained)
         fixed = None if return_model_space or use_pca_model else _categorical_fixed_features(params, d_model)
         with optimization_lock, torch.random.fork_rng():
             torch.manual_seed(seed)
             cand = _optimize_acquisition(acqf, bounds_model, n, controls, botorch_ineq, fixed)
         cand_np = cand.detach().cpu().numpy()
         cand_np = _swap_infeasible_candidates(cand_np, model, len(goal_names), bounds_model, seed)
+        cand_np = _swap_constraint_violations(cand_np, model, cfgs, signs, bounds_model, seed)
         observed = train_X.detach().cpu().numpy()
         if pending is not None:
             observed = np.vstack([observed, pending.detach().cpu().numpy()])

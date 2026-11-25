@@ -134,6 +134,15 @@ def sum_groups_from_config(req: Any, dim: int) -> list[dict[str, Any]]:
     return groups
 
 
+def ratio_min_denominator(constraint: dict[str, Any]) -> float | None:
+    """Denominator floor for a declared ratio. ``a = b = 0`` is not a ratio."""
+    if constraint.get("min_denominator") is not None:
+        return float(constraint["min_denominator"])
+    if constraint.get("min_ratio") is not None or constraint.get("max_ratio") is not None:
+        return 1e-4
+    return None
+
+
 def ratio_constraints_from_config(req: Any) -> list[dict[str, Any]]:
     cfg = getattr(req, "optimization_config", None)
     raw = (getattr(cfg, "ratio_constraints", None) or []) if cfg is not None else []
@@ -239,8 +248,9 @@ def build_linear_constraints(
         if rc.get("min_ratio") is not None:
             mrn = float(rc["min_ratio"])
             ineq.append(([i, j], [1.0, -mrn], 0.0))
-        if rc.get("min_denominator") is not None:
-            ineq.append(([j], [1.0], float(rc["min_denominator"])))
+        floor = ratio_min_denominator(rc)
+        if floor is not None:
+            ineq.append(([j], [1.0], floor))
     return ineq, eqpairs
 
 

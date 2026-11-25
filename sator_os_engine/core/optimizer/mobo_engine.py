@@ -123,7 +123,13 @@ def _decode_latent(
     return x, block, z_actual
 
 
-def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int = 0) -> dict[str, Any]:
+def run_optimization(
+    req: OptimizeRequest,
+    device: str = "cpu",
+    cuda_device: int = 0,
+    *,
+    explain_rows: np.ndarray | None = None,
+) -> dict[str, Any]:
     rng_seed = resolve_seed(req.optimization_config.seed)
 
     # Try BoTorch path if dataset provided; otherwise fallback
@@ -135,7 +141,7 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int
         try:
             with optimization_lock, torch.random.fork_rng():
                 torch.manual_seed(rng_seed)
-                return _run_optimization_locked(req, device, cuda_device, rng_seed)
+                return _run_optimization_locked(req, device, cuda_device, rng_seed, explain_rows=explain_rows)
         except Exception as e:
             # Avoid embedding tracebacks in the error string (leaks paths; job result may be logged).
             raise RuntimeError(f"Optimization failed: {e}") from e
@@ -144,7 +150,14 @@ def run_optimization(req: OptimizeRequest, device: str = "cpu", cuda_device: int
     raise ValueError("OptimizeRequest must include dataset.X and dataset.Y")
 
 
-def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int, rng_seed: int) -> dict[str, Any]:
+def _run_optimization_locked(
+    req: OptimizeRequest,
+    device: str,
+    cuda_device: int,
+    rng_seed: int,
+    *,
+    explain_rows: np.ndarray | None = None,
+) -> dict[str, Any]:
     cfg = req.optimization_config
     num = int(cfg.batch_size)
     dataset = req.dataset or {}
@@ -251,9 +264,9 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
     acq_use_pca = use_pca_model
     acq_pca = pca
     if pca_in_x:
-        from botorch.models.model import ModelList
+        from botorch.models import ModelListGP
 
-        from .pca_model import PcaObservationModel
+        from .pca_model import PcaObservationModel, off_subspace_residual, reconstruct_from_scores
 
         components_t = torch.tensor(np.asarray(pca.components_), dtype=tdtype, device=tdevice)
         mean_t = torch.tensor(np.asarray(pca.mean_), dtype=tdtype, device=tdevice)
@@ -263,11 +276,26 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
         # A single output stays a plain model so qLogEI can call posterior
         # directly. Several outputs need a list so each posterior is evaluated
         # at the same x and then encoded.
-        acq_model = observed[0] if len(observed) == 1 else ModelList(*observed)
+        acq_model = observed[0] if len(observed) == 1 else ModelListGP(*observed)
         acq_bounds = bounds_input
         acq_train = torch.tensor(X_np, dtype=tdtype, device=tdevice)
         acq_use_pca = False
         acq_pca = None
+        scale = getattr(pca, "scaler_scale_", None)
+        scaler_center = getattr(pca, "scaler_mean_", None)
+        if scale is not None and scaler_center is not None:
+            trained_residual = off_subspace_residual(
+                X_np,
+                np.asarray(pca.components_),
+                np.asarray(pca.mean_),
+                np.asarray(scaler_center),
+                np.asarray(scale),
+            )
+            subspace_cap = max(float(np.max(trained_residual)), 1e-8)
+        else:
+            subspace_cap = None
+    else:
+        subspace_cap = None
 
     pending_raw = dataset.get("pending_X", dataset.get("X_pending")) if isinstance(dataset, dict) else None
     x_pending = None
@@ -282,7 +310,16 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
 
     from .acquisition import select_candidates_multiobjective, select_candidates_single_objective
 
-    if n_obj == 1:
+    scoring_supplied = explain_rows is not None
+    if scoring_supplied:
+        rows = np.asarray(explain_rows, dtype=float)
+        if use_ilr and encoder is not None:
+            rows = encoder.forward(rows)
+        elif use_pca_model and pca is not None and not pca_in_x:
+            rows = input_to_z_norm(pca, pc_mins, pc_range, rows)
+        cand = torch.tensor(np.atleast_2d(rows), dtype=tdtype, device=tdevice)
+        num = int(cand.shape[0])
+    elif n_obj == 1:
         cand = select_candidates_single_objective(
             model=acq_model,
             params=params,
@@ -325,6 +362,7 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
         )
 
     preds: list[dict[str, Any]] = []
+    explained_x: list[np.ndarray] = []
     from .cardinality import apply_cardinality
 
     search_bounds = _parameter_bounds(params)
@@ -360,11 +398,53 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
         reconstructed = None
         encoded = None
         encoded_actual = None
+        residual = None
         if pca_in_x:
-            x_vec, candidate_feasible, cand_dict = _original_recipe(requested.detach().cpu().numpy().reshape(-1))
-            encoder = acq_model.models[0] if hasattr(acq_model, "models") else acq_model
+            raw = requested.detach().cpu().numpy().reshape(-1)
+            if subspace_cap is not None:
+                loadings = np.asarray(pca.components_)
+                center = np.asarray(pca.mean_)
+                scores = (raw - center) @ loadings.T
+                z_norm = (scores - np.asarray(pc_mins)) / np.asarray(pc_range)
+                z_norm = np.clip(z_norm, -margin, 1.0 + margin)
+                scores = z_norm * np.asarray(pc_range) + np.asarray(pc_mins)
+                raw = reconstruct_from_scores(
+                    scores,
+                    loadings,
+                    center,
+                    np.asarray(pca.scaler_mean_),
+                    np.asarray(pca.scaler_scale_),
+                ).reshape(-1)
+            x_vec, candidate_feasible, cand_dict = _original_recipe(raw)
+            residual = None
+            if subspace_cap is not None:
+                for _ in range(8):
+                    residual = float(
+                        off_subspace_residual(
+                            x_vec,
+                            np.asarray(pca.components_),
+                            np.asarray(pca.mean_),
+                            np.asarray(pca.scaler_mean_),
+                            np.asarray(pca.scaler_scale_),
+                        )[0]
+                    )
+                    if residual <= subspace_cap * (1.0 + 1e-4) + 1e-8:
+                        break
+                    anchor = X_np[int(np.argmin(np.linalg.norm(X_np - x_vec, axis=1)))]
+                    mixed = 0.5 * np.asarray(x_vec) + 0.5 * anchor
+                    x_vec, candidate_feasible, cand_dict = _original_recipe(mixed)
+                residual = float(
+                    off_subspace_residual(
+                        x_vec,
+                        np.asarray(pca.components_),
+                        np.asarray(pca.mean_),
+                        np.asarray(pca.scaler_mean_),
+                        np.asarray(pca.scaler_scale_),
+                    )[0]
+                )
+            latent_model = acq_model.models[0] if hasattr(acq_model, "models") else acq_model
             z_actual = (
-                encoder.encode(torch.tensor(x_vec.reshape(1, -1), dtype=tdtype, device=tdevice))
+                latent_model.encode(torch.tensor(x_vec.reshape(1, -1), dtype=tdtype, device=tdevice))
                 .detach()
                 .cpu()
                 .numpy()
@@ -423,12 +503,15 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
             "variances": variances,
             "candidate_feasible": bool(candidate_feasible),
         }
+        if residual is not None:
+            pred_item["off_subspace_residual"] = residual
         if encoded is not None:
             pred_item["encoded"] = encoded
             pred_item["encoded_actual"] = encoded_actual
         if reconstructed is not None:
             pred_item["reconstructed"] = reconstructed
         preds.append(pred_item)
+        explained_x.append(np.asarray(x_vec, dtype=float).reshape(-1))
 
     # Hard-constraint goal validation (enforce_above / enforce_below /
     # enforce_within_range). Runs after candidate selection so that
@@ -459,6 +542,37 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
             "per_objective_violations": per_obj_violations,
             "goals": [{"objective": s["name"], "kind": s["kind"], "lo": s["lo"], "hi": s["hi"]} for s in enf_specs],
         }
+
+    from .explain import explain_prediction, parameter_sensitivity
+
+    feature_names = [str(param["name"]) for param in params]
+    if use_pca_model and pca is not None:
+        sensitivity_space = "pca"
+    elif use_ilr:
+        sensitivity_space = "ilr"
+    else:
+        sensitivity_space = "input"
+    sensitivities = parameter_sensitivity(
+        model,
+        feature_names,
+        n_obj=n_obj,
+        space=sensitivity_space,
+        components=None if pca is None else np.asarray(pca.components_, dtype=float),
+        encoder=encoder,
+    )
+    sensitive_names = [item["parameter"] for item in sensitivities.get("parameters", [])]
+    for pred, recipe in zip(preds, explained_x, strict=True):
+        pred["explanation"] = explain_prediction(
+            means=pred["objectives"],
+            variances=pred["variances"],
+            recipe=recipe,
+            trained_x=X_np,
+            trained_y=Y_np,
+            bounds=search_bounds,
+            objective_names=obj_names,
+            goals=goals,
+            sensitive=sensitive_names,
+        )
 
     pareto_idx = _pareto_front([p["objectives"] for p in preds], minimize_frame=-signs)
     pareto = {"indices": pareto_idx, "points": [preds[i]["objectives"] for i in pareto_idx]}
@@ -495,7 +609,8 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
         "seed": int(rng_seed),
         "batch_size": num,
         "mode": str(getattr(cfg, "mode", "lab")),
-        "acquisition": resolve_acquisition_name(req, n_obj, tX),
+        "acquisition": "explain" if scoring_supplied else resolve_acquisition_name(req, n_obj, tX),
+        "sensitivities": sensitivities,
         "dropped_rows": dropped_rows,
         "rows_collapsed": int(prepared["collapsed"]),
         "fixed_noise": bool(prepared["fixed_noise"]),

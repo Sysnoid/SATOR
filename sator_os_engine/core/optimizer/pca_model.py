@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 from botorch.models.model import Model
 from torch import Tensor
 
@@ -34,15 +35,22 @@ class PcaObservationModel(Model):
     def num_outputs(self) -> int:
         return self._num_outputs
 
+    @property
+    def likelihood(self):  # noqa: ANN201
+        return self.inner.likelihood
+
     def encode(self, X: Tensor) -> Tensor:
         z_raw = (X - self.mean) @ self.components.T
         return (z_raw - self.pc_mins) / self.pc_range
 
-    def posterior(self, X, observation_noise=False, posterior_transform=None):  # noqa: ANN001
+    def posterior(self, X, observation_noise=False, posterior_transform=None, **kwargs):  # noqa: ANN001
+        # ModelList.posterior forwards output_indices. The latent GP accepts it
+        # through **kwargs and ignores it for a single output.
         return self.inner.posterior(
             self.encode(X),
             observation_noise=observation_noise,
             posterior_transform=posterior_transform,
+            **kwargs,
         )
 
     def subset_output(self, idcs: list[int]) -> Model:
@@ -53,3 +61,42 @@ class PcaObservationModel(Model):
             self.pc_mins,
             self.pc_range,
         )
+
+
+def _as_rows(x: np.ndarray) -> np.ndarray:
+    rows = np.asarray(x, dtype=float)
+    if rows.ndim == 1:
+        rows = rows.reshape(1, -1)
+    return rows
+
+
+def reconstruct_from_scores(
+    scores: np.ndarray,
+    components: np.ndarray,
+    mean: np.ndarray,
+    scaler_mean: np.ndarray,
+    scaler_scale: np.ndarray,
+) -> np.ndarray:
+    """Vector form of ``scaled_pca_inverse``."""
+    sigma = np.maximum(np.asarray(scaler_scale, dtype=float).reshape(-1), 1e-12)
+    mu = np.asarray(scaler_mean, dtype=float).reshape(-1)
+    mean_eff = np.asarray(mean, dtype=float).reshape(-1)
+    c_pca = np.asarray(components, dtype=float) * sigma
+    mu_pca = (mean_eff - mu) / sigma
+    return (_as_rows(scores) @ c_pca + mu_pca) * sigma + mu
+
+
+def off_subspace_residual(
+    x: np.ndarray,
+    components: np.ndarray,
+    mean: np.ndarray,
+    scaler_mean: np.ndarray,
+    scaler_scale: np.ndarray,
+) -> np.ndarray:
+    """Distance, in scaled units, from each row to its PCA reconstruction."""
+    rows = _as_rows(x)
+    mean_eff = np.asarray(mean, dtype=float).reshape(-1)
+    scores = (rows - mean_eff) @ np.asarray(components, dtype=float).T
+    restored = reconstruct_from_scores(scores, components, mean, scaler_mean, scaler_scale)
+    sigma = np.maximum(np.asarray(scaler_scale, dtype=float).reshape(-1), 1e-12)
+    return np.linalg.norm((rows - restored) / sigma, axis=1)

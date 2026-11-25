@@ -32,6 +32,7 @@ Every call except `/livez`, `/readyz`, and `/metrics` requires `x-api-key`.
 | `GET`  | `/readyz`                        | Readiness probe |
 | `GET`  | `/metrics`                       | Prometheus metrics *(if `SATOR_ENABLE_METRICS=true`)* |
 | `POST` | `/v1/optimize`                   | Submit an optimization job *(async)* |
+| `POST` | `/v1/explain`                    | Score supplied recipes and explain them *(sync)* |
 | `POST` | `/v1/reconstruct`                | Submit a reconstruction job *(async)* |
 | `GET`  | `/v1/jobs/{job_id}`              | Job status |
 | `GET`  | `/v1/jobs/{job_id}/result`       | Final job result *(once `SUCCEEDED`)* |
@@ -122,7 +123,7 @@ Supported `goal` values and their extra fields are detailed in
 | `target_tolerance` | float | — | Tolerance band around target-attainment goals. |
 | `target_variance_penalty` | float | — | Variance weighting for `goal="target"`. |
 | `sum_constraints` | array | — | `[{"indices":[0,1],"target_sum":1.0}, ...]` |
-| `ratio_constraints` | array | — | `[{"i":0,"j":1,"min_ratio":0.5,"max_ratio":2.0}, ...]` |
+| `ratio_constraints` | array | — | `[{"i":0,"j":1,"min_ratio":0.5,"max_ratio":2.0}, ...]`. A declared ratio keeps the denominator at least `1e-4` unless `min_denominator` is set. |
 | `ingredient_rules` | object | — | `{"max_nonzero": 4, "min_dose": 0.02}` inside each sum group. |
 | `mixture_transform` | `none` \| `ilr` | `none` | ILR coordinates for sum groups. Not combined with PCA or categoricals. |
 | `return_maps` | bool | `false` | Return GP posterior maps in the response. |
@@ -199,6 +200,13 @@ use the `sobol` grid path regardless of the `acquisition` string.
       "candidate":     { "x1": 0.33, "x2": -0.1 },
       "objectives":    [0.91, 0.42],
       "variances":     [0.12, 0.05],
+      "explanation": {
+        "objectives": [{"name": "o1", "mean": 0.91, "sd": 0.35, "best_tested": 0.40, "better_than_best": false}],
+        "nearest_tested": {"index": 2, "distance": 0.18, "objectives": [0.40, 0.50]},
+        "role": "explore",
+        "sensitive_parameters": ["x1", "x2"],
+        "summary": "Predicted o1 0.91 ± 0.3466, short of the best tested 0.4. The nearest tested recipe is 0.18 search-box lengths away."
+      },
       "encoded":       [0.47, 0.62],            // only when use_pca=true
       "reconstructed": {                        // only when PCA + reconstruction applies
         "ingredients": [0.6, 0.4],
@@ -222,6 +230,8 @@ use the `sobol` grid path regardless of the `acquisition` string.
   }
 }
 ```
+
+`explanation` is attached to every prediction. `mean` and `sd` are in the units of `Y`. `nearest_tested.distance` is the Euclidean distance in the unit search box, with a categorical mismatch counting as 1. `index` points at the rows the GP was fit on, after replicate rows have been averaged. `role` is `exploit` when one objective improves on the best tested value and the recipe is close to existing data, `tradeoff` for a multi-objective recipe near that data, and `explore` otherwise. `diagnostics.sensitivities` ranks parameters by inverse lengthscale, mapped back to the original columns when the GP was trained in PCA or ILR coordinates.
 
 ---
 
@@ -264,7 +274,8 @@ constraints. Powered by SLSQP.
 | `n_ingredients` | Number of ingredient columns at the front of the combined vector. |
 | `sum_target` | Target sum for the ingredient columns (default `1.0`). |
 | `ratio_constraints` | Pairwise ratio bounds on `x_i / x_j`. |
-| `target_precision` | SLSQP convergence tolerance. |
+| `target_precision` | SLSQP convergence tolerance. Default `1e-3`. |
+| `x_reference` | Optional recipe, in original column order, used as the point the reconstruction stays close to. When it is omitted, that point is the scaled-PCA inverse. The endpoint returns a feasible recipe near that point, which is one of many recipes with the same latent coordinate. Pass the inline candidate here to reproduce it. |
 | `ingredient_names` / `parameter_names` | Optional; when supplied, the response includes `reconstructed_formulation.by_name`. |
 
 ### 5.4.2 Responses
@@ -338,3 +349,12 @@ All error responses share the shape:
 | `409` | Idempotency conflict (same key, different body). |
 | `429` | Rate limit exceeded. |
 | `500` | Internal error. Exception text is included only when `SATOR_EXPOSE_ERROR_DETAILS=true`. |
+
+---
+
+## 5.7 `POST /v1/explain`
+
+Score recipes the caller already has. The body is an optimize request plus `candidates`, a list of objects keyed by parameter name. The response has the same shape as an optimize result: one prediction per candidate, each with `explanation`. `diagnostics.acquisition` is `explain`. The call is synchronous and does not propose a new batch.
+
+A candidate that omits a parameter is a 422.
+

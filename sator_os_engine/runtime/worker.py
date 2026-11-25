@@ -41,7 +41,11 @@ def run_reconstruct_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     scale = None
     x_reference = None
-    if (
+    if request.x_reference is not None:
+        x_reference = np.asarray(request.x_reference, dtype=float)
+        if request.pca_info and request.pca_info.scaler_scale:
+            scale = np.array(request.pca_info.scaler_scale, dtype=float)
+    elif (
         request.pca_info
         and request.pca_info.scaler_scale
         and request.pca_info.scaler_mean

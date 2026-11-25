@@ -24,6 +24,7 @@ class ReconstructionRequest(BaseModel):
     sum_groups: list[dict[str, Any]] | None = None
     variable_bounds: list[list[float]] | None = None
     column_names: list[str] | None = None
+    x_reference: list[float] | None = None
     ratio_constraints: list[dict[str, float]] | None = None  # list of {i,j,min_ratio,max_ratio}
     ingredient_names: list[str] | None = None  # in order; length n_ingredients
     parameter_names: list[str] | None = None  # in order; length of bounds.parameters
@@ -63,6 +64,16 @@ class ReconstructionRequest(BaseModel):
         n_parameters = len(self.bounds.get("parameters") or []) if isinstance(self.bounds, dict) else 0
         if self.parameter_names is not None and len(self.parameter_names) != n_parameters:
             raise ValueError("parameter_names length must equal the number of parameter bounds")
+        if self.x_reference is not None:
+            width = 0
+            if info.components:
+                width = len(info.components[0])
+            elif isinstance(self.variable_bounds, list) and self.variable_bounds:
+                width = len(self.variable_bounds)
+            elif isinstance(self.bounds, dict):
+                width = len(self.bounds.get("ingredients") or []) + len(self.bounds.get("parameters") or [])
+            if width and len(self.x_reference) != width:
+                raise ValueError(f"len(x_reference)={len(self.x_reference)} must equal the recipe width {width}")
         return self
 
 
