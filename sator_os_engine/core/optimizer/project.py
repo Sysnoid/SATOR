@@ -78,6 +78,8 @@ def is_feasible(
             continue
         denom = max(float(v[j]), 1e-12)
         ratio = float(v[i]) / denom
+        if rc.get("min_denominator") is not None and float(v[j]) + atol < float(rc["min_denominator"]):
+            return False
         if rc.get("min_ratio") is not None and ratio < float(rc["min_ratio"]) - atol:
             return False
         if rc.get("max_ratio") is not None and ratio > float(rc["max_ratio"]) + atol:
@@ -95,6 +97,15 @@ def project_to_feasible(
     target = np.asarray(x_hat, dtype=float).reshape(-1)
     lb = np.array([lo for lo, _ in bounds], dtype=float)
     ub = np.array([hi for _, hi in bounds], dtype=float)
+    for rc in ratio_constraints or []:
+        if rc.get("min_denominator") is None:
+            continue
+        try:
+            j = int(rc.get("j", -1))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= j < lb.shape[0]:
+            lb[j] = max(float(lb[j]), float(rc["min_denominator"]))
     dim = int(target.shape[0])
     cons = _sum_constraints(sum_groups, dim) + _ratio_constraints(ratio_constraints, dim)
 

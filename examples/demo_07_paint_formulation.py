@@ -43,19 +43,8 @@ def forward(X: np.ndarray) -> np.ndarray:
     temp = X[:, N_ING]
     shear = X[:, N_ING + 1]
     cost = W @ PRICE_PER_KG
-    opacity = (
-        60.0 * W[:, 0]
-        + 10.0 * W[:, 1]
-        + 5.0 * W[:, 3]
-        + 0.006 * shear
-        - 40.0 * (W[:, 0] - 0.3) ** 2
-    )
-    drying_time = (
-        60.0 * (1.0 - W[:, 2])
-        - 0.4 * (temp - 20.0)
-        + 4.0 * W[:, 4]
-        - 1.5 * W[:, 5]
-    )
+    opacity = 60.0 * W[:, 0] + 10.0 * W[:, 1] + 5.0 * W[:, 3] + 0.006 * shear - 40.0 * (W[:, 0] - 0.3) ** 2
+    drying_time = 60.0 * (1.0 - W[:, 2]) - 0.4 * (temp - 20.0) + 4.0 * W[:, 4] - 1.5 * W[:, 5]
     return np.stack([cost, opacity, drying_time], axis=1)
 
 
@@ -114,8 +103,9 @@ def main() -> None:
 
     ax = axes[0, 0]
     sc = ax.scatter(Y[:, 0], Y[:, 1], c=Y[:, 2], cmap="viridis", s=45, alpha=0.8, label="train")
-    ax.scatter(Yp[:, 0], Yp[:, 1], c=Yp[:, 2], cmap="viridis", s=160, marker="X",
-               edgecolor="red", linewidth=1.5, label="pred")
+    ax.scatter(
+        Yp[:, 0], Yp[:, 1], c=Yp[:, 2], cmap="viridis", s=160, marker="X", edgecolor="red", linewidth=1.5, label="pred"
+    )
     fig.colorbar(sc, ax=ax, label="drying_time (train)")
     ax.set_xlabel("cost ($/kg)")
     ax.set_ylabel("opacity")

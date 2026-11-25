@@ -63,6 +63,8 @@ Submit an optimization request.
 | `X` | `number[][]` | Prior input points, one row per observation. Categorical columns may be choice labels. |
 | `Y` | `number[][]` | Prior objective values. Column order must match `objectives`. Non-finite entries are dropped per objective. |
 | `pending_X` | `number[][]` | Recipes already running but not yet measured. Also accepted as `X_pending`. |
+| `Yvar` | `number[][]` | Known outcome variance, same shape as `Y`. Selects a fixed-noise GP. |
+| `failed` | `bool[]` | One flag per row. Failures train a feasibility model and down-weight infeasible proposals. |
 
 `X` and `Y` are required, must have the same number of rows (at least one), and
 `Y` must have one column per objective. A column that is entirely NaN or inf is
@@ -107,19 +109,22 @@ Supported `goal` values and their extra fields are detailed in
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `acquisition` | string | `qnehvi` | One of `qnehvi`, `qehvi`, `qnoisyehvi`, `parego`, `qei`, `qpi`, `qucb`, `sobol`. See [§5.3.6](#536-acquisition-functions). |
+| `acquisition` | string | `qnehvi` | `qnehvi`, `qehvi`, `qnoisyehvi`, `qlognei`, `parego`, `qei`, `qpi`, `qucb`, `sobol`, or `auto`. `auto` with `mode: lab` uses qLogNEI / qLogNEHVI. |
+| `mode` | `lab` \| `throughput` | `lab` | `lab` treats `acquisition: auto` as noisy. `throughput` keeps qLogEI / qLogEHVI unless `Yvar`, replicates, or failures are present. |
 | `batch_size` | int 1–16 | `4` | Number of candidates returned per request. |
 | `max_evaluations` | int ≥ 1 | `100` | Accepted for compatibility. The acquisition loop uses `advanced.acq_maxiter` (default 200). |
 | `seed` | int | — | RNG seed. Omitted seeds are drawn at random and returned in `diagnostics.seed`. |
 | `use_pca` | bool | `false` | Fit PCA on `X` for modeling and/or visualization. |
 | `pca_dimension` | int or `"auto"` | — | Required when `use_pca=true`. `1 <= k <= min(n-1, d)`, or `"auto"` for 95% variance capped at 10. |
-| `pca_margin` | float | `0.2` | Expands the latent search box from `[0, 1]` to `[-m, 1+m]`. |
+| `pca_margin` | float | `0` | Kept for compatibility. PCA acquisition searches in the original variables, so the latent margin is not the search box. |
 | `parameter_scaling` | `none` \| `standardize` \| `minmax` | `minmax` | Input transform. Default min-max uses the search bounds. |
 | `value_normalization` | `none` \| `standardize` \| `minmax` | `standardize` | Outcome transform inside the GP. |
 | `target_tolerance` | float | — | Tolerance band around target-attainment goals. |
 | `target_variance_penalty` | float | — | Variance weighting for `goal="target"`. |
 | `sum_constraints` | array | — | `[{"indices":[0,1],"target_sum":1.0}, ...]` |
 | `ratio_constraints` | array | — | `[{"i":0,"j":1,"min_ratio":0.5,"max_ratio":2.0}, ...]` |
+| `ingredient_rules` | object | — | `{"max_nonzero": 4, "min_dose": 0.02}` inside each sum group. |
+| `mixture_transform` | `none` \| `ilr` | `none` | ILR coordinates for sum groups. Not combined with PCA or categoricals. |
 | `return_maps` | bool | `false` | Return GP posterior maps in the response. |
 | `map_space` | `input` \| `pca` | `input` | Coordinate system for returned maps. |
 | `map_resolution` | `[nx, ny, (nz)]` | — | Grid resolution for maps. |

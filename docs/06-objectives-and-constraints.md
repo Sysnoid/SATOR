@@ -25,7 +25,9 @@ SATOR splits goal types into three families:
   candidates that satisfy your intent but does **not** guarantee it.
 - **Threshold goals** (`minimize_below`, `maximize_above`, `maximize_below`,
   `minimize_above`) are outcome constraints on that acquisition. `weight`
-  does not choose the side of the threshold.
+  does not choose the side of the threshold. A `min` or `max` objective can
+  carry the same limit as `outcome_constraint: {"upper": T}` or `{"lower": T}`
+  without changing its direction.
 - **Hard goals** (the `enforce_*` family) are evaluated against the GP
   posterior and used as a feasibility mask during candidate selection.
   Every returned prediction carries an `enforced_goals_satisfied` flag so

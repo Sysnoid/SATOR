@@ -192,6 +192,31 @@ def z_norm_to_input(pca, pc_mins: np.ndarray, pc_range: np.ndarray, z_norm: np.n
     return pca.inverse_transform(z_raw)
 
 
+def scaled_pca_inverse(
+    z: np.ndarray,
+    components: np.ndarray,
+    mean: np.ndarray,
+    scaler_mean: np.ndarray,
+    scaler_scale: np.ndarray,
+) -> np.ndarray:
+    """Inverse of ``ScaledPCA`` from the fields stored in ``encoding_info``.
+
+    ``components`` and ``mean`` are the effective encoder. ``scaler_*`` recover
+    the underlying standard-scale PCA inverse, which is what
+    ``ScaledPCA.inverse_transform`` returns.
+    """
+    sigma = np.asarray(scaler_scale, dtype=float).reshape(-1)
+    mu = np.asarray(scaler_mean, dtype=float).reshape(-1)
+    c_eff = np.asarray(components, dtype=float)
+    mean_eff = np.asarray(mean, dtype=float).reshape(-1)
+    safe = np.maximum(sigma, 1e-12)
+    c_pca = c_eff * safe
+    mu_pca = (mean_eff - mu) / safe
+    scores = np.atleast_2d(np.asarray(z, dtype=float))
+    x_scaled = scores @ c_pca + mu_pca
+    return (x_scaled * safe + mu).reshape(-1)
+
+
 def input_to_z_norm(pca, pc_mins: np.ndarray, pc_range: np.ndarray, X: np.ndarray) -> np.ndarray:
     z_raw = pca.transform(X)
     return (z_raw - pc_mins) / pc_range

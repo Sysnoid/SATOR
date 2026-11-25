@@ -14,7 +14,7 @@ from _common import mpl_setup, post_optimize_and_wait
 
 def rosenbrock(x: np.ndarray) -> np.ndarray:
     x1, x2 = x[..., 0], x[..., 1]
-    return ((1.0 - x1) ** 2 + 100.0 * (x2 - x1 ** 2) ** 2).astype(float)
+    return ((1.0 - x1) ** 2 + 100.0 * (x2 - x1**2) ** 2).astype(float)
 
 
 def main() -> None:

@@ -1,19 +1,20 @@
 from __future__ import annotations
 
+import json
 import os
 import time
-from typing import Any, Dict, List
-import json
+from typing import Any
 
 import numpy as np
 
 try:
     import matplotlib
+
     matplotlib.use("TkAgg")
 except Exception:
     pass
-import matplotlib.pyplot as plt
 import httpx
+import matplotlib.pyplot as plt
 
 
 def synth_dataset(n_samples: int = 20, n_ing: int = 9, rng_seed: int = 7):
@@ -27,7 +28,13 @@ def synth_dataset(n_samples: int = 20, n_ing: int = 9, rng_seed: int = 7):
     P = np.stack([pH, temp, visc, price, press], axis=1)
     X = np.concatenate([W, P], axis=1)
     # two objectives to minimize
-    o1 = 0.6 * np.abs(pH - 7.0) + 0.001 * (temp - 45.0) ** 2 + 0.0004 * visc + 2.0 * (W[:, 3] - 0.15) ** 2 + 1.5 * (W[:, 1] - 0.1) ** 2
+    o1 = (
+        0.6 * np.abs(pH - 7.0)
+        + 0.001 * (temp - 45.0) ** 2
+        + 0.0004 * visc
+        + 2.0 * (W[:, 3] - 0.15) ** 2
+        + 1.5 * (W[:, 1] - 0.1) ** 2
+    )
     o2 = 1.8 * price + 0.05 * temp + 4.0 * W[:, 5] + 3.0 * W[:, 2] + 0.3 * press
     Y = np.stack([o1, o2], axis=1)
     return X, Y
@@ -38,24 +45,29 @@ def main() -> None:
     base = os.environ.get("SATOR_BASE_URL", "http://localhost:8080")
 
     n_ing = 9
-    param_bounds = np.array([
-        [2.0, 12.0],    # pH
-        [20.0, 90.0],   # temperature C
-        [100.0, 2000.0],# viscosity cP
-        [1.0, 10.0],    # price
-        [1.0, 5.0],     # pressure bar
-    ], dtype=float)
+    param_bounds = np.array(
+        [
+            [2.0, 12.0],  # pH
+            [20.0, 90.0],  # temperature C
+            [100.0, 2000.0],  # viscosity cP
+            [1.0, 10.0],  # price
+            [1.0, 5.0],  # pressure bar
+        ],
+        dtype=float,
+    )
 
     X, Y = synth_dataset(n_samples=20, n_ing=n_ing, rng_seed=7)
 
     # search space
-    params: List[dict] = []
+    params: list[dict] = []
     for i in range(n_ing):
-        params.append({"name": f"w{i+1}", "type": "float", "min": 0.0, "max": 1.0})
+        params.append({"name": f"w{i + 1}", "type": "float", "min": 0.0, "max": 1.0})
     for j, (lo, hi) in enumerate(param_bounds):
-        params.append({"name": ["pH", "temp", "visc", "price", "press"][j], "type": "float", "min": float(lo), "max": float(hi)})
+        params.append(
+            {"name": ["pH", "temp", "visc", "price", "press"][j], "type": "float", "min": float(lo), "max": float(hi)}
+        )
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "dataset": {"X": X.tolist(), "Y": Y.tolist()},
         "search_space": {"parameters": params},
         "objectives": {"quality_loss": {"goal": "min"}, "cost": {"goal": "min"}},
@@ -85,15 +97,17 @@ def main() -> None:
         f.write(json.dumps(payload, indent=2))
     oc = payload["optimization_config"]
     print("\n--- Optimize payload (summary) ---")
-    print({
-        "acquisition": oc.get("acquisition"),
-        "batch_size": oc.get("batch_size"),
-        "max_evaluations": oc.get("max_evaluations"),
-        "use_pca": oc.get("use_pca"),
-        "pca_dimension": oc.get("pca_dimension"),
-        "sum_constraints": len(oc.get("sum_constraints") or []),
-        "saved_to": payload_path,
-    })
+    print(
+        {
+            "acquisition": oc.get("acquisition"),
+            "batch_size": oc.get("batch_size"),
+            "max_evaluations": oc.get("max_evaluations"),
+            "use_pca": oc.get("use_pca"),
+            "pca_dimension": oc.get("pca_dimension"),
+            "sum_constraints": len(oc.get("sum_constraints") or []),
+            "saved_to": payload_path,
+        }
+    )
 
     with httpx.Client(timeout=60.0) as client:
         r = client.post(f"{base}/v1/optimize", json=payload, headers={"x-api-key": api_key})
@@ -128,17 +142,21 @@ def main() -> None:
     print(f"predictions: {len(preds)}")
     if preds:
         first = preds[0]
-        print("first prediction:", json.dumps({
-            "candidate": first.get("candidate"),
-            "objectives": first.get("objectives"),
-            "variances": first.get("variances"),
-            "encoded": first.get("encoded"),
-            "reconstructed": first.get("reconstructed")
-        }, indent=2))
+        print(
+            "first prediction:",
+            json.dumps(
+                {
+                    "candidate": first.get("candidate"),
+                    "objectives": first.get("objectives"),
+                    "variances": first.get("variances"),
+                    "encoded": first.get("encoded"),
+                    "reconstructed": first.get("reconstructed"),
+                },
+                indent=2,
+            ),
+        )
     if result.get("diagnostics"):
         print("diagnostics:", result.get("diagnostics"))
-    names = [f"w{i+1}" for i in range(n_ing)] + ["pH", "temp", "visc", "price", "press"]
-    P = np.array([[*(pred["candidate"].get(n, 0.0) for n in names)] for pred in preds], dtype=float)
 
     # Use server-provided PCA model for visualization; do not fit locally
     enc = result.get("encoding_info") or {}
@@ -169,8 +187,16 @@ def main() -> None:
     maps_means = gp.get("maps", {}).get("means") if gp else None
     titles = list(result.get("objectives", {}).keys()) if result.get("objectives") else ["quality_loss", "cost"]
     if axes and maps_means:
-        print("gp_maps:", {"dimension": gp.get("dimension"), "space": gp.get("space"), "resolution": gp.get("grid", {}).get("resolution")})
+        print(
+            "gp_maps:",
+            {
+                "dimension": gp.get("dimension"),
+                "space": gp.get("space"),
+                "resolution": gp.get("grid", {}).get("resolution"),
+            },
+        )
         from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
         xax = np.array(axes[0], dtype=float)
         yax = np.array(axes[1], dtype=float)
         XX, YY = np.meshgrid(xax, yax, indexing="xy")
@@ -256,5 +282,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

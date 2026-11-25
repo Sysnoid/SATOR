@@ -17,13 +17,16 @@ class OptimizationConfig(BaseModel):
     # Multi-objective (min/max): qnehvi=qLogEHVI (default), qehvi, qnoisyehvi, parego|qei, qpi, qucb|ucb.
     # Single-objective (min/max): same names map to qLogEI, qEI, qPI, qUCB, etc. Use acquisition="sobol" to force the legacy Sobol+scoring grid.
     acquisition: str = Field("qnehvi")
+    # lab: exact GP and, when acquisition is "auto", a noisy acquisition.
+    # throughput: "auto" stays on qLogEI / qLogEHVI unless Yvar, replicates, or failures are present.
+    mode: str = Field("lab")
     batch_size: int = Field(4, ge=1, le=MAX_BATCH)
     max_evaluations: int = Field(100, ge=1)
     seed: int | None = None
     use_pca: bool = False
     pca_dimension: int | str | None = None
     # Expands the PCA search box from the training envelope [0, 1] to [-m, 1+m].
-    pca_margin: float = Field(0.2, ge=0.0, le=2.0)
+    pca_margin: float = Field(0.0, ge=0.0, le=2.0)
     parameter_scaling: str | None = None  # none|standardize|minmax
     value_normalization: str | None = None  # none|standardize|minmax
     target_tolerance: float | None = None
@@ -40,6 +43,10 @@ class OptimizationConfig(BaseModel):
     enforcement_uncertainty_margin: float = 0.0
     sum_constraints: list[dict[str, Any]] | None = None  # [{"indices":[0,1,2],"target_sum":1.0}]
     ratio_constraints: list[dict[str, Any]] | None = None  # [{"i":0,"j":1,"min_ratio":0.5,"max_ratio":2.0}]
+    # {"max_nonzero": 4, "min_dose": 0.02} applied inside each sum group.
+    ingredient_rules: dict[str, Any] | None = None
+    # none leaves ingredients in the original coordinates. ilr maps each sum group onto the simplex.
+    mixture_transform: str | None = None
     # GP surface/volume maps for visualization (2D/3D only)
     return_maps: bool = False
     map_space: str = Field("input")  # input|pca
@@ -70,6 +77,19 @@ class OptimizationConfig(BaseModel):
                 continue
             if str(value).strip().lower() not in {"none", "standardize", "minmax"}:
                 raise ValueError(f"{label} must be one of none, standardize, minmax")
+        if str(self.mode).strip().lower() not in {"lab", "throughput"}:
+            raise ValueError("mode must be 'lab' or 'throughput'")
+        transform = None if self.mixture_transform is None else str(self.mixture_transform).strip().lower()
+        if transform not in {None, "none", "ilr"}:
+            raise ValueError("mixture_transform must be 'none' or 'ilr'")
+        if transform == "ilr" and self.use_pca:
+            raise ValueError("mixture_transform 'ilr' cannot be combined with use_pca")
+        rules = self.ingredient_rules
+        if rules is not None:
+            if rules.get("max_nonzero") is not None and int(rules["max_nonzero"]) < 1:
+                raise ValueError("ingredient_rules.max_nonzero must be >= 1")
+            if rules.get("min_dose") is not None and float(rules["min_dose"]) < 0:
+                raise ValueError("ingredient_rules.min_dose must be >= 0")
         if self.use_pca and self.pca_dimension is None:
             raise ValueError("pca_dimension is required when use_pca is true")
         if isinstance(self.pca_dimension, str) and self.pca_dimension.strip().lower() != "auto":
@@ -93,6 +113,9 @@ class OptimizeRequest(BaseModel):
         if not isinstance(params, list) or not params:
             raise ValueError("search_space.parameters must be a non-empty list")
         self._validate_parameters(params)
+        transform = str(self.optimization_config.mixture_transform or "none").lower()
+        if transform == "ilr" and any(str(p.get("type", "float")) == "categorical" for p in params):
+            raise ValueError("mixture_transform 'ilr' does not support categorical parameters")
         if not isinstance(self.objectives, dict) or not self.objectives:
             raise ValueError("objectives must be a non-empty object")
         for name, cfg in self.objectives.items():
@@ -122,6 +145,18 @@ class OptimizeRequest(BaseModel):
         n_obj = len(self.objectives)
         if y.shape[1] != n_obj:
             raise ValueError(f"dataset.Y has {y.shape[1]} column(s) but {n_obj} objectives were declared")
+        yvar = self.dataset.get("Yvar")
+        if yvar is not None:
+            variances = np.asarray(yvar, dtype=float)
+            if variances.ndim == 1:
+                variances = variances.reshape(-1, 1)
+            if variances.shape != y.shape:
+                raise ValueError(f"dataset.Yvar shape {variances.shape} must match dataset.Y shape {y.shape}")
+            if np.any(np.isfinite(variances) & (variances < 0)):
+                raise ValueError("dataset.Yvar must be non-negative")
+        failed = self.dataset.get("failed")
+        if failed is not None and len(failed) != len(x_rows):
+            raise ValueError("dataset.failed must have one entry per row of dataset.X")
         for j, name in enumerate(self.objectives):
             col = y[:, j]
             if np.isfinite(col).any():
@@ -142,6 +177,15 @@ class OptimizeRequest(BaseModel):
             from ..optimizer.preprocess import resolve_pca_k
 
             resolve_pca_k(finite_x, n_params, k)
+            numeric_rows = []
+            for row in x_rows:
+                try:
+                    numeric_rows.append([round(float(value), 8) for value in row])
+                except (TypeError, ValueError):
+                    numeric_rows = []
+                    break
+            if len(numeric_rows) >= 2 and len({tuple(row) for row in numeric_rows}) < 2:
+                raise ValueError("PCA components are degenerate: dataset.X rows are identical")
         return self
 
     def _merge_request_constraints(self) -> None:

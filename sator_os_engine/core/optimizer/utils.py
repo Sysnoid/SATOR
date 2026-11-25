@@ -33,6 +33,8 @@ KNOWN_ACQUISITIONS = frozenset(
         "qlognoisyehvi",
         "qlognei",
         "qnei",
+        "qlognehvi",
+        "auto",
         "qlogei",
         "logei",
         "parego",
@@ -237,6 +239,8 @@ def build_linear_constraints(
         if rc.get("min_ratio") is not None:
             mrn = float(rc["min_ratio"])
             ineq.append(([i, j], [1.0, -mrn], 0.0))
+        if rc.get("min_denominator") is not None:
+            ineq.append(([j], [1.0], float(rc["min_denominator"])))
     return ineq, eqpairs
 
 

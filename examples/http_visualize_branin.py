@@ -1,34 +1,34 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
-from typing import Any, Dict
-import json
+from typing import Any
 
 import numpy as np
 
 try:
     import matplotlib
+
     matplotlib.use("TkAgg")
 except Exception:
     pass
+import httpx
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-
-import httpx
 
 
 def branin(x: np.ndarray) -> np.ndarray:
     x1 = x[..., 0]
     x2 = x[..., 1]
     a = 1.0
-    b = 5.1 / (4.0 * math.pi ** 2)
+    b = 5.1 / (4.0 * math.pi**2)
     c = 5.0 / math.pi
     r = 6.0
     s = 10.0
     t = 1.0 / (8.0 * math.pi)
-    return (a * (x2 - b * x1 ** 2 + c * x1 - r) ** 2 + s * (1 - t) * np.cos(x1) + s).astype(float)
+    return (a * (x2 - b * x1**2 + c * x1 - r) ** 2 + s * (1 - t) * np.cos(x1) + s).astype(float)
 
 
 def main() -> None:
@@ -43,7 +43,7 @@ def main() -> None:
     X = bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) * u
     Y = branin(X)[:, None]
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "dataset": {"X": X.tolist(), "Y": Y.tolist()},
         "search_space": {
             "parameters": [
@@ -72,13 +72,15 @@ def main() -> None:
         f.write(json.dumps(payload, indent=2))
     print("\n--- Optimize payload (summary) ---")
     oc = payload["optimization_config"]
-    print({
-        "acquisition": oc.get("acquisition"),
-        "batch_size": oc.get("batch_size"),
-        "max_evaluations": oc.get("max_evaluations"),
-        "return_maps": oc.get("return_maps"),
-        "saved_to": payload_path,
-    })
+    print(
+        {
+            "acquisition": oc.get("acquisition"),
+            "batch_size": oc.get("batch_size"),
+            "max_evaluations": oc.get("max_evaluations"),
+            "return_maps": oc.get("return_maps"),
+            "saved_to": payload_path,
+        }
+    )
 
     with httpx.Client(timeout=30.0) as client:
         r = client.post(f"{base}/v1/optimize", json=payload, headers={"x-api-key": api_key})
@@ -110,11 +112,17 @@ def main() -> None:
     preds = result.get("predictions", [])
     print(f"predictions: {len(preds)}")
     if preds:
-        print("first prediction:", json.dumps({
-            "candidate": preds[0].get("candidate"),
-            "objectives": preds[0].get("objectives"),
-            "variances": preds[0].get("variances")
-        }, indent=2))
+        print(
+            "first prediction:",
+            json.dumps(
+                {
+                    "candidate": preds[0].get("candidate"),
+                    "objectives": preds[0].get("objectives"),
+                    "variances": preds[0].get("variances"),
+                },
+                indent=2,
+            ),
+        )
 
     preds = result.get("predictions", [])
     P = np.array([[p["candidate"]["x1"], p["candidate"]["x2"]] for p in preds], dtype=float)
@@ -149,5 +157,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

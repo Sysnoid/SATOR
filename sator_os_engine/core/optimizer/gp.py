@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from botorch.fit import fit_gpytorch_mll
 from botorch.models import ModelListGP, SingleTaskGP
+from botorch.models.gp_regression_mixed import MixedSingleTaskGP
 from botorch.models.transforms.input import InputTransform, Normalize
 from botorch.models.transforms.outcome import OutcomeTransform, Standardize, TransformedPosterior
 from gpytorch.mlls import ExactMarginalLogLikelihood
@@ -144,8 +145,20 @@ def _input_transform(tX: torch.Tensor, bounds: torch.Tensor | None, scaling: str
         std = tX.std(dim=0, unbiased=False)
         return _FixedStandardize(mean, std.clamp_min(1e-6))
     if bounds is not None:
-        return Normalize(d=d, bounds=bounds)
+        # Normalize to the data envelope, widened by 10% of the search box and
+        # clipped to that box. Dedup still uses the full search bounds.
+        return Normalize(d=d, bounds=_data_envelope(tX, bounds))
     return Normalize(d=d)
+
+
+def _data_envelope(tX: torch.Tensor, bounds: torch.Tensor, widen: float = 0.1) -> torch.Tensor:
+    data_lo = tX.min(dim=0).values
+    data_hi = tX.max(dim=0).values
+    span = (bounds[1] - bounds[0]).clamp_min(1e-6)
+    lo = torch.maximum(bounds[0], data_lo - widen * span)
+    hi = torch.minimum(bounds[1], data_hi + widen * span)
+    hi = torch.maximum(hi, lo + 1e-6)
+    return torch.stack([lo, hi])
 
 
 def _outcome_transform(yi: torch.Tensor, mode: str | None):
@@ -165,6 +178,9 @@ def build_models(
     cfg,
     bounds: torch.Tensor | None = None,
     row_masks: list[torch.Tensor] | None = None,
+    train_Yvar: torch.Tensor | None = None,
+    feasibility: torch.Tensor | None = None,
+    cat_dims: list[int] | None = None,
 ) -> ModelListGP:
     # Without an input transform the GP's RBF kernel learns one lengthscale
     # in the *raw* feature space. When features have wildly different scales
@@ -187,13 +203,30 @@ def build_models(
         xi = tX[mask]
         yi = yi_all[mask]
         # A fresh module per objective: one InputTransform cannot be registered twice.
-        train_x = xi if scaling and str(scaling).strip().lower() == "standardize" else tX
-        m = SingleTaskGP(
-            xi,
-            yi,
-            input_transform=_input_transform(train_x, bounds, scaling),
-            outcome_transform=_outcome_transform(yi, y_norm),
-        )
+        yvar_i = None
+        if train_Yvar is not None:
+            col = train_Yvar[mask, i : i + 1]
+            if bool(torch.isfinite(col).all()) and float(col.min()) >= 0.0:
+                yvar_i = col.clamp_min(1e-10)
+        outcome = _outcome_transform(yi, y_norm)
+        if cat_dims:
+            m = MixedSingleTaskGP(
+                xi,
+                yi,
+                cat_dims=cat_dims,
+                train_Yvar=yvar_i,
+                input_transform=None,
+                outcome_transform=outcome,
+            )
+        else:
+            train_x = xi if scaling and str(scaling).strip().lower() == "standardize" else tX
+            m = SingleTaskGP(
+                xi,
+                yi,
+                train_Yvar=yvar_i,
+                input_transform=_input_transform(train_x, bounds, scaling),
+                outcome_transform=outcome,
+            )
         try:
             cfg_gp = {}
             if hasattr(cfg, "gp_config") and cfg.gp_config:
@@ -217,6 +250,27 @@ def build_models(
         except Exception:
             pass
         models.append(m)
+    if feasibility is not None:
+        labels = feasibility.reshape(-1).to(dtype=tX.dtype, device=tX.device)
+        if int(labels.shape[0]) == int(tX.shape[0]) and bool((labels <= 0).any()) and bool((labels >= 1).any()):
+            yf = labels.unsqueeze(-1)
+            if cat_dims:
+                feas_model = MixedSingleTaskGP(
+                    tX,
+                    yf,
+                    cat_dims=cat_dims,
+                    input_transform=None,
+                    outcome_transform=Standardize(m=1),
+                )
+            else:
+                feas_model = SingleTaskGP(
+                    tX,
+                    yf,
+                    input_transform=_input_transform(tX, bounds, scaling),
+                    outcome_transform=Standardize(m=1),
+                )
+            fit_gpytorch_mll(ExactMarginalLogLikelihood(feas_model.likelihood, feas_model))
+            models.append(feas_model)
     return ModelListGP(*models)
 
 

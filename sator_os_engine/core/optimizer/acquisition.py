@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from botorch.acquisition.logei import qLogExpectedImprovement
+from botorch.acquisition.logei import qLogExpectedImprovement, qLogNoisyExpectedImprovement
 from botorch.acquisition.monte_carlo import (
     qExpectedImprovement,
     qProbabilityOfImprovement,
@@ -18,8 +18,9 @@ from botorch.acquisition.multi_objective.logei import (
 from botorch.acquisition.multi_objective.monte_carlo import (
     qExpectedHypervolumeImprovement,
 )
+from botorch.acquisition.multi_objective.objective import GenericMCMultiOutputObjective
 from botorch.acquisition.objective import GenericMCObjective
-from botorch.optim.optimize import optimize_acqf
+from botorch.optim.optimize import optimize_acqf, optimize_acqf_mixed
 from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.utils.multi_objective.box_decompositions import NondominatedPartitioning
 from botorch.utils.multi_objective.scalarization import get_chebyshev_scalarization
@@ -92,8 +93,11 @@ def _input_space_to_z_norm(
     return (z_raw - pc_mins) / pc_range
 
 
-_EHVI_NAMES = frozenset({"qehvi", "ehvi", "qnehvi", "qlogehvi", "qlehvi", "logehvi", "qnoisyehvi", "qlognoisyehvi"})
-_BOTORCH_NAMES = KNOWN_ACQUISITIONS - {"sobol"}
+_EHVI_NAMES = frozenset(
+    {"qehvi", "ehvi", "qnehvi", "qlogehvi", "qlehvi", "logehvi", "qnoisyehvi", "qlognoisyehvi", "qlognehvi"}
+)
+_NOISY_MO = frozenset({"qnoisyehvi", "qlognoisyehvi", "qlognehvi"})
+_BOTORCH_NAMES = KNOWN_ACQUISITIONS - {"sobol", "auto"}
 
 
 def _normalize_acquisition_name(req: Any) -> str:
@@ -105,6 +109,34 @@ def _normalize_acquisition_name(req: Any) -> str:
     if name not in KNOWN_ACQUISITIONS:
         raise ValueError(f"unknown acquisition {raw!r}")
     return name
+
+
+def _replicate_rows(train_X: torch.Tensor | None) -> bool:
+    if train_X is None or int(train_X.shape[0]) < 2:
+        return False
+    rows = train_X.detach().cpu().numpy()
+    keys = {tuple(np.round(row, 8)) for row in rows}
+    return len(keys) < int(rows.shape[0])
+
+
+def resolve_acquisition_name(req: Any, n_obj: int, train_X: torch.Tensor | None = None) -> str:
+    """Map ``acquisition: auto`` to a concrete BoTorch acquisition.
+
+    Lab mode treats measurements as noisy, so ``auto`` selects qLogNEI or
+    qLogNEHVI. Throughput mode keeps qLogEI / qLogEHVI unless the dataset
+    carries ``Yvar``, replicate rows, or failed batches.
+    """
+    name = _normalize_acquisition_name(req)
+    if name != "auto":
+        return name
+    cfg = getattr(req, "optimization_config", None)
+    mode = str(getattr(cfg, "mode", "lab") or "lab").strip().lower()
+    dataset = getattr(req, "dataset", None)
+    explicit = isinstance(dataset, dict) and (dataset.get("Yvar") is not None or dataset.get("failed") is not None)
+    noisy = mode != "throughput" or explicit or _replicate_rows(train_X)
+    if int(n_obj) <= 1:
+        return "qlognei" if noisy else "qlogei"
+    return "qlognehvi" if noisy else "qnehvi"
 
 
 def _objective_sign(goal: str) -> float:
@@ -183,6 +215,21 @@ def _has_threshold(goal: str, cfg: dict[str, Any]) -> bool:
     return threshold_spec({**cfg, "goal": normalize_goal(goal)}) is not None
 
 
+def _bound_specs(goal: str, cfg: dict[str, Any]) -> list[tuple[str, float]]:
+    """Threshold goals plus explicit ``outcome_constraint`` upper/lower bounds."""
+    specs: list[tuple[str, float]] = []
+    threshold = threshold_spec({**cfg, "goal": normalize_goal(goal)})
+    if threshold is not None:
+        specs.append(threshold)
+    raw = cfg.get("outcome_constraint") if isinstance(cfg, dict) else None
+    if isinstance(raw, dict):
+        if raw.get("upper") is not None:
+            specs.append(("below", float(raw["upper"])))
+        if raw.get("lower") is not None:
+            specs.append(("above", float(raw["lower"])))
+    return specs
+
+
 def _is_directional(goal: str, cfg: dict[str, Any]) -> bool:
     g = normalize_goal(goal)
     if g in ("min", "minimize", "max", "maximize"):
@@ -198,14 +245,71 @@ def _optimizer_controls(req: Any, *, q: int, n_obj: int, name: str) -> dict[str,
     maxiter = int(ap.get("acq_maxiter", adv.get("acq_maxiter", adv.get("maxiter", 200))))
     batch_limit = int(ap.get("batch_limit", adv.get("batch_limit", 5)))
     sequential = bool(ap.get("sequential", adv.get("sequential", False)))
-    if name in _EHVI_NAMES and (q > 1 or n_obj > 2):
-        sequential = True
     return {
         "num_restarts": max(1, num_restarts),
         "raw_samples": max(1, raw_samples),
         "options": {"batch_limit": max(1, batch_limit), "maxiter": max(1, maxiter)},
         "sequential": sequential,
     }
+
+
+def _categorical_fixed_features(params: list[dict[str, Any]], d_model: int) -> list[dict[int, float]] | None:
+    """Enumerate categorical levels when the product is at most 64."""
+    if d_model != len(params):
+        return None
+    dims: list[int] = []
+    levels: list[list[int]] = []
+    for i, param in enumerate(params):
+        if param.get("type") != "categorical":
+            continue
+        n_levels = len(param.get("choices") or [])
+        if n_levels < 1:
+            return None
+        dims.append(i)
+        levels.append(list(range(n_levels)))
+    if not dims:
+        return None
+    combinations = 1
+    for level in levels:
+        combinations *= len(level)
+    if combinations > 64:
+        return None
+    from itertools import product
+
+    return [{dim: float(level) for dim, level in zip(dims, combo, strict=True)} for combo in product(*levels)]
+
+
+def _optimize_acquisition(
+    acqf: Any,
+    bounds: torch.Tensor,
+    q: int,
+    controls: dict[str, Any],
+    inequality: list[Any] | None,
+    fixed_features: list[dict[int, float]] | None,
+) -> torch.Tensor:
+    if fixed_features:
+        cand, _ = optimize_acqf_mixed(
+            acqf,
+            bounds=bounds,
+            q=q,
+            num_restarts=controls["num_restarts"],
+            fixed_features_list=fixed_features,
+            raw_samples=controls["raw_samples"],
+            options=controls["options"],
+            inequality_constraints=inequality,
+        )
+        return cand
+    cand, _ = optimize_acqf(
+        acqf,
+        bounds=bounds,
+        q=q,
+        num_restarts=controls["num_restarts"],
+        raw_samples=controls["raw_samples"],
+        inequality_constraints=inequality,
+        options=controls["options"],
+        sequential=controls["sequential"],
+    )
+    return cand
 
 
 def _reference_point(tY: torch.Tensor, req: Any, signs: np.ndarray) -> torch.Tensor:
@@ -232,22 +336,97 @@ def _threshold_constraints(cfgs: list[dict[str, Any]]) -> list[Any] | None:
     cons: list[Any] = []
     for index, cfg in enumerate(cfgs):
         goal = normalize_goal(cfg.get("goal", "min"))
-        spec = threshold_spec({**cfg, "goal": goal})
-        if spec is None:
-            continue
-        side, level = spec
         sign = training_sign(goal)
+        for side, level in _bound_specs(goal, cfg):
 
-        def _constraint(
-            z: torch.Tensor, *, index: int = index, side: str = side, level: float = level, sign: float = sign
-        ) -> torch.Tensor:
-            f = z[..., index] * sign
-            if side == "below":
-                return f - level
-            return level - f
+            def _constraint(
+                z: torch.Tensor,
+                *,
+                index: int = index,
+                side: str = side,
+                level: float = level,
+                sign: float = sign,
+            ) -> torch.Tensor:
+                f = z[..., index] * sign
+                if side == "below":
+                    return f - level
+                return level - f
 
-        cons.append(_constraint)
+            cons.append(_constraint)
     return cons or None
+
+
+def _swap_infeasible_candidates(
+    cand_np: np.ndarray,
+    model: Any,
+    n_obj: int,
+    bounds: Any,
+    seed: int,
+) -> np.ndarray:
+    """Replace proposals whose feasibility posterior mean is below 0.5.
+
+    Monte Carlo acquisition can exploit a high-variance extrapolation of the
+    failure model. The returned recipe is chosen from a Sobol grid on the
+    posterior mean instead, so a failed region is not proposed.
+    """
+    models = getattr(model, "models", None)
+    if models is None or len(models) <= n_obj:
+        return cand_np
+    reference = next(model.parameters())
+
+    def _mean(submodel: Any, rows: np.ndarray) -> np.ndarray:
+        xt = torch.tensor(np.atleast_2d(rows), dtype=reference.dtype, device=reference.device)
+        return submodel.posterior(xt).mean.detach().cpu().numpy().reshape(-1)
+
+    feas_mean = _mean(models[-1], cand_np)
+    if np.all(feas_mean >= 0.5):
+        return cand_np
+    lo, hi = _bound_arrays(bounds)
+    engine = SobolEngine(dimension=int(lo.shape[0]), scramble=True, seed=int(seed) % (2**31 - 1) or 1)
+    grid = lo + (hi - lo) * engine.draw(512).cpu().numpy()
+    grid_feas = _mean(models[-1], grid)
+    pool = grid[grid_feas >= 0.5]
+    if pool.size == 0:
+        pool = grid[int(np.argmax(grid_feas)) : int(np.argmax(grid_feas)) + 1]
+    scores = np.zeros(pool.shape[0], dtype=float)
+    for k in range(n_obj):
+        scores += _mean(models[k], pool)
+    ranked = pool[np.argsort(scores)[::-1]]
+    out = np.array(cand_np, dtype=float, copy=True)
+    fill = 0
+    for i in range(out.shape[0]):
+        if feas_mean[i] < 0.5:
+            out[i] = ranked[min(fill, ranked.shape[0] - 1)]
+            fill += 1
+    return out
+
+
+def _with_feasibility(
+    model: Any,
+    n_obj: int,
+    constraints: list[Any] | None,
+) -> tuple[Any, list[Any] | None, Any]:
+    """Fold P(success) into the acquisition objective.
+
+    The trailing model is trained on 1 = success and 0 = failure. A large
+    negative penalty is added when a sample falls below 0.5, which is the
+    acquisition-level version of multiplying by the probability of success.
+    """
+    n_models = len(model.models) if hasattr(model, "models") else 1
+    if n_models <= n_obj:
+        return model, constraints, None
+
+    def _penalty(samples: torch.Tensor) -> torch.Tensor:
+        gate = torch.sigmoid((samples[..., -1] - 0.5) / 0.05)
+        return torch.log(gate.clamp_min(1e-6))
+
+    if n_obj <= 1:
+        objective = GenericMCObjective(lambda samples, X=None: samples[..., 0] + _penalty(samples))
+    else:
+        objective = GenericMCMultiOutputObjective(
+            lambda samples, X=None: samples[..., :n_obj] + _penalty(samples).unsqueeze(-1)
+        )
+    return model, constraints, objective
 
 
 def _best_signed(y_user: np.ndarray, goal: str, cfg: dict[str, Any]) -> float:
@@ -457,6 +636,7 @@ def select_candidates_single_objective(
     Y_np: np.ndarray,
     train_X: torch.Tensor | None = None,
     X_pending: torch.Tensor | None = None,
+    return_model_space: bool = False,
 ) -> torch.Tensor:
     # Coerce bounds to tensors if lists were passed
     if not hasattr(bounds_input, "shape"):
@@ -465,12 +645,12 @@ def select_candidates_single_objective(
         bounds_model = torch.tensor(bounds_model, dtype=tdtype, device=tdevice)
 
     seed = resolve_seed(rng_seed)
-    name = _normalize_acquisition_name(req)
+    name = resolve_acquisition_name(req, 1, train_X)
     ap = _acquisition_params(req)
     obj_cfgs = _objective_cfgs(req)
     cfg0 = obj_cfgs[0] if obj_cfgs else {"goal": "min"}
     goal = normalize_goal(cfg0.get("goal", "min"))
-    constrained = _has_threshold(goal, cfg0)
+    constrained = bool(_bound_specs(goal, cfg0))
     directional = _is_directional(goal, cfg0)
     ucb_beta = float(ap.get("ucb_beta", ap.get("beta", 0.1)) or 0.1)
     pi_tau = float(ap.get("pi_tau", ap.get("tau", 1e-3)) or 1e-3)
@@ -482,35 +662,50 @@ def select_candidates_single_objective(
         best_f = _best_signed(np.asarray(Y_np, dtype=float), goal, cfg0)
         pending = _as_pending(X_pending, tdtype, tdevice)
         cons = _threshold_constraints([cfg0]) if constrained else None
+        acqf_model, cons, objective = _with_feasibility(model, 1, cons)
+        if acqf_model is model and objective is None:
+            acqf_model = st
+        baseline = _as_pending(train_X, tdtype, tdevice)
         sampler = _sobol_qmc_sampler(qmc_n, seed, tdtype, tdevice)
-        if constrained or name not in ("qucb", "ucb", "qpi", "pi", "qehvi"):
-            acqf: Any = qLogExpectedImprovement(st, best_f=best_f, sampler=sampler, constraints=cons, X_pending=pending)
-        elif name in ("qucb", "ucb"):
-            acqf = qUpperConfidenceBound(st, beta=ucb_beta, sampler=sampler)
-        elif name in ("qpi", "pi"):
-            acqf = qProbabilityOfImprovement(st, best_f=best_f, sampler=sampler, tau=pi_tau)
+        # qLogEI at q=1 is analytical and ignores outcome constraints. Use qLogNEI
+        # whenever a constraint or a feasibility model has to be sampled.
+        noisy = name in ("qlognei", "qnei") or objective is not None or cons is not None
+        if noisy and baseline is not None:
+            acqf: Any = qLogNoisyExpectedImprovement(
+                acqf_model,
+                X_baseline=baseline,
+                sampler=sampler,
+                objective=objective,
+                constraints=cons,
+                X_pending=pending,
+                prune_baseline=True,
+            )
+        elif name in ("qucb", "ucb") and objective is None:
+            acqf = qUpperConfidenceBound(acqf_model, beta=ucb_beta, sampler=sampler)
+        elif name in ("qpi", "pi") and objective is None:
+            acqf = qProbabilityOfImprovement(acqf_model, best_f=best_f, sampler=sampler, tau=pi_tau)
+        elif name == "qehvi" and objective is None:
+            acqf = qExpectedImprovement(acqf_model, best_f=best_f, sampler=sampler)
         else:
-            acqf = qExpectedImprovement(st, best_f=best_f, sampler=sampler)
+            acqf = qLogExpectedImprovement(
+                acqf_model, best_f=best_f, sampler=sampler, objective=objective, constraints=cons, X_pending=pending
+            )
         d_m = int(bounds_model.shape[1])
         ineq = _linear_inequality_for_botorch(req, params, use_pca_model, d_m, tdevice, tdtype)
         controls = _optimizer_controls(req, q=n, n_obj=1, name=name if not constrained else "qlogei")
+        fixed = None if return_model_space or use_pca_model else _categorical_fixed_features(params, d_m)
         with optimization_lock, torch.random.fork_rng():
             torch.manual_seed(seed)
-            cand, _ = optimize_acqf(
-                acqf,
-                bounds=bounds_model,
-                q=n,
-                num_restarts=controls["num_restarts"],
-                raw_samples=controls["raw_samples"],
-                inequality_constraints=ineq,
-                options=controls["options"],
-                sequential=controls["sequential"],
-            )
+            cand = _optimize_acquisition(acqf, bounds_model, n, controls, ineq, fixed)
         cand_np = cand.detach().cpu().numpy()
+        cand_np = _swap_infeasible_candidates(cand_np, model, 1, bounds_model, seed)
         observed = train_X.detach().cpu().numpy() if train_X is not None else None
         if pending is not None:
             pend_np = pending.detach().cpu().numpy()
             observed = pend_np if observed is None else np.vstack([observed, pend_np])
+        if return_model_space and not (use_pca_model and pca is not None):
+            cand_np = _dedup_rows(cand_np, observed, bounds_model, n, seed)
+            return torch.tensor(cand_np, dtype=tdtype, device=tdevice)
         if use_pca_model and pca is not None and pc_mins is not None and pc_range is not None:
             z_raw = cand_np * np.asarray(pc_range) + np.asarray(pc_mins)
             x_in = _project_rows(pca.inverse_transform(z_raw), params, req)
@@ -662,6 +857,7 @@ def select_candidates_multiobjective(
     Y_np: np.ndarray,
     train_X: torch.Tensor,
     X_pending: torch.Tensor | None = None,
+    return_model_space: bool = False,
 ) -> torch.Tensor:
     # Coerce bounds to tensors if lists were passed
     if not hasattr(bounds_input, "shape"):
@@ -669,12 +865,12 @@ def select_candidates_multiobjective(
     if not hasattr(bounds_model, "shape"):
         bounds_model = torch.tensor(bounds_model, dtype=tdtype, device=tdevice)
     seed = resolve_seed(rng_seed)
-    name = _normalize_acquisition_name(req)
+    name = resolve_acquisition_name(req, len(goals), train_X)
     goal_names = [normalize_goal(g) for g in goals]
     cfgs = _objective_cfgs(req, goal_names)
     for i, g in enumerate(goal_names):
         cfgs[i] = {**cfgs[i], "goal": g}
-    constrained = any(_has_threshold(g, cfgs[i]) for i, g in enumerate(goal_names))
+    constrained = any(_bound_specs(g, cfgs[i]) for i, g in enumerate(goal_names))
     directional = all(_is_directional(g, cfgs[i]) or _has_threshold(g, cfgs[i]) for i, g in enumerate(goal_names))
     signs = np.array([training_sign(g) for g in goal_names], dtype=float)
     y_raw = np.asarray(Y_np, dtype=float)
@@ -686,41 +882,45 @@ def select_candidates_multiobjective(
     tY = torch.tensor(y_raw[finite_rows] * signs, dtype=tdtype, device=tdevice)
     baseline_X = train_X[torch.as_tensor(finite_rows, device=train_X.device)]
     if directional and (constrained or name in _BOTORCH_NAMES):
+        if (not constrained) and len(goal_names) >= 3 and n > 1 and name in {"qnehvi", "qlogehvi", "qlehvi", "logehvi"}:
+            name = "qlognehvi"
         ap = _acquisition_params(req)
         qmc_n = int(ap.get("qmc_samples", 256) or 256)
         ucb_beta = float(ap.get("ucb_beta", ap.get("beta", 0.1)) or 0.1)
         pi_tau = float(ap.get("pi_tau", ap.get("tau", 1e-3)) or 1e-3)
         pending = _as_pending(X_pending, tdtype, tdevice)
         cons = _threshold_constraints(cfgs)
+        acqf_model, cons, mo_objective = _with_feasibility(model, len(goal_names), cons)
         rp = _reference_point(tY, req, signs)
         part = NondominatedPartitioning(ref_point=rp.detach().cpu(), Y=tY.detach().cpu())
         d_model = int(bounds_model.shape[1])
         botorch_ineq = _linear_inequality_for_botorch(req, params, use_pca_model, d_model, tdevice, tdtype)
         acqf: Any
-        if name in ("qehvi", "ehvi") and not constrained:
-            acqf = qExpectedHypervolumeImprovement(model=model, ref_point=rp.tolist(), partitioning=part)
-        elif name in ("qnoisyehvi", "qlognoisyehvi") or constrained:
-            acqf = (
-                qLogNoisyExpectedHypervolumeImprovement(
-                    model=model,
-                    ref_point=rp.tolist(),
-                    X_baseline=baseline_X,
-                    prune_baseline=True,
-                    constraints=cons,
-                    X_pending=pending,
-                )
-                if name in ("qnoisyehvi", "qlognoisyehvi")
-                else qLogExpectedHypervolumeImprovement(
-                    model=model,
-                    ref_point=rp.tolist(),
-                    partitioning=part,
-                    constraints=cons,
-                    X_pending=pending,
-                )
+        if name in ("qehvi", "ehvi") and not constrained and mo_objective is None:
+            acqf = qExpectedHypervolumeImprovement(model=acqf_model, ref_point=rp.tolist(), partitioning=part)
+        elif name in _NOISY_MO or mo_objective is not None:
+            acqf = qLogNoisyExpectedHypervolumeImprovement(
+                model=acqf_model,
+                ref_point=rp.tolist(),
+                X_baseline=baseline_X,
+                prune_baseline=True,
+                cache_root=True,
+                constraints=cons,
+                X_pending=pending,
+                objective=mo_objective,
+            )
+        elif constrained:
+            acqf = qLogExpectedHypervolumeImprovement(
+                model=acqf_model,
+                ref_point=rp.tolist(),
+                partitioning=part,
+                constraints=cons,
+                X_pending=pending,
+                objective=mo_objective,
             )
         elif name in ("qnehvi", "qlogehvi", "qlehvi", "logehvi"):
             acqf = qLogExpectedHypervolumeImprovement(
-                model=model, ref_point=rp.tolist(), partitioning=part, constraints=cons, X_pending=pending
+                model=acqf_model, ref_point=rp.tolist(), partitioning=part, constraints=cons, X_pending=pending
             )
         elif name in ("parego", "qparego", "qei"):
             sampler = _sobol_qmc_sampler(qmc_n, seed, tdtype, tdevice)
@@ -741,22 +941,18 @@ def select_candidates_multiobjective(
                 model=model, ref_point=rp.tolist(), partitioning=part, constraints=cons, X_pending=pending
             )
         controls = _optimizer_controls(req, q=n, n_obj=len(goal_names), name=name)
+        fixed = None if return_model_space or use_pca_model else _categorical_fixed_features(params, d_model)
         with optimization_lock, torch.random.fork_rng():
             torch.manual_seed(seed)
-            cand, _ = optimize_acqf(
-                acqf,
-                bounds=bounds_model,
-                q=n,
-                num_restarts=controls["num_restarts"],
-                raw_samples=controls["raw_samples"],
-                inequality_constraints=botorch_ineq,
-                options=controls["options"],
-                sequential=controls["sequential"],
-            )
+            cand = _optimize_acquisition(acqf, bounds_model, n, controls, botorch_ineq, fixed)
         cand_np = cand.detach().cpu().numpy()
+        cand_np = _swap_infeasible_candidates(cand_np, model, len(goal_names), bounds_model, seed)
         observed = train_X.detach().cpu().numpy()
         if pending is not None:
             observed = np.vstack([observed, pending.detach().cpu().numpy()])
+        if return_model_space and not (use_pca_model and pca is not None):
+            cand_np = _dedup_rows(cand_np, observed, bounds_model, n, seed)
+            return torch.tensor(cand_np, dtype=tdtype, device=tdevice)
         lo, hi = _bound_arrays(bounds_model)
         if use_pca_model and pca is not None:
             z_raw = cand_np * np.asarray(pc_range) + np.asarray(pc_mins)

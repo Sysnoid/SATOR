@@ -11,6 +11,7 @@ from ..security.ip_filters import IPFilterMiddleware
 from ..settings import Settings, get_settings
 from .deps import run_store_sweeps, shutdown_executor
 from .errors import register_error_handlers
+from .routes.design import router as design_router
 from .routes.jobs import router as jobs_router
 from .routes.optimize import router as optimize_router
 from .routes.reconstruct import router as reconstruct_router
@@ -50,6 +51,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     # Routes
     app.include_router(optimize_router, prefix="/v1", tags=["optimize"])
+    app.include_router(design_router, prefix="/v1", tags=["design"])
     app.include_router(reconstruct_router, prefix="/v1", tags=["reconstruct"])
     app.include_router(jobs_router, prefix="/v1", tags=["jobs"])
     register_error_handlers(app)

@@ -19,7 +19,7 @@ TARGET_VALUE = 2.5
 def ackley(x: np.ndarray) -> np.ndarray:
     x1, x2 = x[..., 0], x[..., 1]
     a, b, c = 20.0, 0.2, 2.0 * math.pi
-    r = np.sqrt(0.5 * (x1 ** 2 + x2 ** 2))
+    r = np.sqrt(0.5 * (x1**2 + x2**2))
     t = 0.5 * (np.cos(c * x1) + np.cos(c * x2))
     return (-a * np.exp(-b * r) - np.exp(t) + a + math.e).astype(float)
 

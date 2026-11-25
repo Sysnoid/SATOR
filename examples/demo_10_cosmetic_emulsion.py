@@ -50,22 +50,30 @@ from _common import (
 OUT_DIR = Path("examples/responses/demo_10")
 
 INGREDIENTS = [
-    "water", "glycerin", "propanediol", "squalane", "jojoba_oil",
-    "cetearyl_alcohol", "PEG100_stearate", "niacinamide", "hyaluronic_acid", "preservative",
+    "water",
+    "glycerin",
+    "propanediol",
+    "squalane",
+    "jojoba_oil",
+    "cetearyl_alcohol",
+    "PEG100_stearate",
+    "niacinamide",
+    "hyaluronic_acid",
+    "preservative",
 ]
 PROCESS = ["mix_temp_C", "homog_speed_rpm"]
 
 ING_BOUNDS = {
-    "water":            (0.55,  0.80),
-    "glycerin":         (0.02,  0.10),
-    "propanediol":      (0.00,  0.05),
-    "squalane":         (0.01,  0.15),
-    "jojoba_oil":       (0.00,  0.10),
-    "cetearyl_alcohol": (0.02,  0.06),
-    "PEG100_stearate":  (0.01,  0.04),
-    "niacinamide":      (0.00,  0.05),
-    "hyaluronic_acid":  (0.00,  0.02),
-    "preservative":     (0.005, 0.015),
+    "water": (0.55, 0.80),
+    "glycerin": (0.02, 0.10),
+    "propanediol": (0.00, 0.05),
+    "squalane": (0.01, 0.15),
+    "jojoba_oil": (0.00, 0.10),
+    "cetearyl_alcohol": (0.02, 0.06),
+    "PEG100_stearate": (0.01, 0.04),
+    "niacinamide": (0.00, 0.05),
+    "hyaluronic_acid": (0.00, 0.02),
+    "preservative": (0.005, 0.015),
 }
 PROC_BOUNDS = {"mix_temp_C": (60.0, 85.0), "homog_speed_rpm": (2000.0, 12000.0)}
 
@@ -75,17 +83,28 @@ RATIO_MIN, RATIO_MAX = 1.5, 3.0
 
 OBJECTIVES = ["viscosity_cP", "spreadability", "stability_days", "cost_per_kg"]
 
-PRICE_PER_KG = np.array([
-    0.5, 5.0, 8.0, 40.0, 30.0, 12.0, 25.0, 60.0, 800.0, 20.0,
-])
+PRICE_PER_KG = np.array(
+    [
+        0.5,
+        5.0,
+        8.0,
+        40.0,
+        30.0,
+        12.0,
+        25.0,
+        60.0,
+        800.0,
+        20.0,
+    ]
+)
 
 VISC_LO, VISC_HI, VISC_IDEAL = 15000.0, 30000.0, 22500.0
 
 PHASE_GROUPS = {
-    "aqueous":    ["water", "glycerin", "propanediol"],
-    "oil":        ["squalane", "jojoba_oil"],
+    "aqueous": ["water", "glycerin", "propanediol"],
+    "oil": ["squalane", "jojoba_oil"],
     "emulsifier": ["cetearyl_alcohol", "PEG100_stearate"],
-    "active":     ["niacinamide", "hyaluronic_acid"],
+    "active": ["niacinamide", "hyaluronic_acid"],
     "functional": ["preservative"],
 }
 
@@ -94,7 +113,16 @@ def forward(X: np.ndarray) -> np.ndarray:
     """Return (viscosity, spreadability, stability_days, cost_per_kg)."""
     W = X[:, : len(INGREDIENTS)]
     (
-        water, _gly, _pdo, squalane, jojoba, cetearyl, peg, niacin, _ha, pres,
+        water,
+        _gly,
+        _pdo,
+        squalane,
+        jojoba,
+        cetearyl,
+        peg,
+        niacin,
+        _ha,
+        pres,
     ) = W.T
     mix_temp = X[:, len(INGREDIENTS)]
     homog = X[:, len(INGREDIENTS) + 1]
@@ -107,12 +135,8 @@ def forward(X: np.ndarray) -> np.ndarray:
         - 15000.0 * (water - 0.70)
         + 0.08 * homog
     )
-    spreadability = (
-        1.0 + 3.0 * squalane + 5.0 * jojoba - 2.0 * cetearyl + 0.0001 * homog - 0.00002 * viscosity
-    )
-    stability_days = (
-        45.0 + 2000.0 * pres - 200.0 * np.abs(niacin - 0.03) - 0.3 * np.abs(mix_temp - 75.0)
-    )
+    spreadability = 1.0 + 3.0 * squalane + 5.0 * jojoba - 2.0 * cetearyl + 0.0001 * homog - 0.00002 * viscosity
+    stability_days = 45.0 + 2000.0 * pres - 200.0 * np.abs(niacin - 0.03) - 0.3 * np.abs(mix_temp - 75.0)
     cost = W @ PRICE_PER_KG
     return np.stack([viscosity, spreadability, stability_days, cost], axis=1)
 
@@ -152,20 +176,29 @@ def _stage1_inputs(X: np.ndarray, Y: np.ndarray) -> None:
     sample_cols = [f"s{i + 1:02d}" for i in range(X.shape[0])]
     render_table(
         "Ingredient mass fractions (ingredient x sample)",
-        col_headers=sample_cols, row_headers=INGREDIENTS,
-        matrix=X[:, : len(INGREDIENTS)].T, fmt="{:.4f}", row_label="ingredient",
+        col_headers=sample_cols,
+        row_headers=INGREDIENTS,
+        matrix=X[:, : len(INGREDIENTS)].T,
+        fmt="{:.4f}",
+        row_label="ingredient",
         save_path=OUT_DIR / "01_ingredients.txt",
     )
     render_table(
         "Process parameters (parameter x sample)",
-        col_headers=sample_cols, row_headers=PROCESS,
-        matrix=X[:, len(INGREDIENTS) :].T, fmt="{:.2f}", row_label="parameter",
+        col_headers=sample_cols,
+        row_headers=PROCESS,
+        matrix=X[:, len(INGREDIENTS) :].T,
+        fmt="{:.2f}",
+        row_label="parameter",
         save_path=OUT_DIR / "02_parameters.txt",
     )
     render_table(
         "Measured objective values (objective x sample)",
-        col_headers=sample_cols, row_headers=OBJECTIVES,
-        matrix=Y.T, fmt="{:.2f}", row_label="objective",
+        col_headers=sample_cols,
+        row_headers=OBJECTIVES,
+        matrix=Y.T,
+        fmt="{:.2f}",
+        row_label="objective",
         save_path=OUT_DIR / "03_objectives.txt",
     )
 
@@ -183,16 +216,16 @@ def _stage2_spec() -> None:
     render_key_value_block(
         "Objectives (goal, limits)",
         [
-            ("viscosity_cP",    f"within_range [{VISC_LO:.0f}, {VISC_HI:.0f}] ideal={VISC_IDEAL:.0f}"),
-            ("spreadability",   "max"),
-            ("stability_days",  "max"),
-            ("cost_per_kg",     "min"),
+            ("viscosity_cP", f"within_range [{VISC_LO:.0f}, {VISC_HI:.0f}] ideal={VISC_IDEAL:.0f}"),
+            ("spreadability", "max"),
+            ("stability_days", "max"),
+            ("cost_per_kg", "min"),
         ],
         save_path=OUT_DIR / "04_goals.txt",
     )
     constraints: list[tuple[str, str]] = [
         ("sum(ingredients) = 1.0", f"indices {list(range(len(INGREDIENTS)))}"),
-        ("ratio cetearyl/PEG",     f"in [{RATIO_MIN:.2f}, {RATIO_MAX:.2f}]"),
+        ("ratio cetearyl/PEG", f"in [{RATIO_MIN:.2f}, {RATIO_MAX:.2f}]"),
     ]
     for name in INGREDIENTS:
         lo, hi = ING_BOUNDS[name]
@@ -201,17 +234,18 @@ def _stage2_spec() -> None:
         lo, hi = PROC_BOUNDS[name]
         constraints.append((f"bound {name}", f"[{lo:g}, {hi:g}]"))
     render_key_value_block(
-        "Constraints", constraints,
+        "Constraints",
+        constraints,
         save_path=OUT_DIR / "05_constraints.txt",
     )
     render_key_value_block(
         "Engine config",
         [
-            ("acquisition",     "qei (ParEGO scalarization)"),
-            ("batch_size",      "5"),
+            ("acquisition", "qei (ParEGO scalarization)"),
+            ("batch_size", "5"),
             ("max_evaluations", "32"),
-            ("seed",            "11"),
-            ("use_pca",         "False  (ingredient-space GP)"),
+            ("seed", "11"),
+            ("use_pca", "False  (ingredient-space GP)"),
         ],
         save_path=OUT_DIR / "06_config.txt",
     )
@@ -225,16 +259,20 @@ def _stage3_predictions(preds: list[dict]) -> np.ndarray:
 
     render_table(
         "Ingredient mass fractions (ingredient x candidate)",
-        col_headers=cand_cols, row_headers=INGREDIENTS,
+        col_headers=cand_cols,
+        row_headers=INGREDIENTS,
         matrix=P[:, : len(INGREDIENTS)].T,
-        fmt="{:.4f}", row_label="ingredient",
+        fmt="{:.4f}",
+        row_label="ingredient",
         save_path=OUT_DIR / "07_predictions_ingredients.txt",
     )
     render_table(
         "Process parameters (parameter x candidate)",
-        col_headers=cand_cols, row_headers=PROCESS,
+        col_headers=cand_cols,
+        row_headers=PROCESS,
         matrix=P[:, len(INGREDIENTS) :].T,
-        fmt="{:.2f}", row_label="parameter",
+        fmt="{:.2f}",
+        row_label="parameter",
         save_path=OUT_DIR / "08_predictions_parameters.txt",
     )
     return P
@@ -249,14 +287,20 @@ def _stage4_gp_posteriors(preds: list[dict]) -> tuple[np.ndarray, np.ndarray]:
 
     render_table(
         "GP posterior mean per objective (objective x candidate)",
-        col_headers=cand_cols, row_headers=OBJECTIVES,
-        matrix=mus.T, fmt="{:.2f}", row_label="objective",
+        col_headers=cand_cols,
+        row_headers=OBJECTIVES,
+        matrix=mus.T,
+        fmt="{:.2f}",
+        row_label="objective",
         save_path=OUT_DIR / "09_gp_mean.txt",
     )
     render_table(
         "GP posterior std per objective (objective x candidate)",
-        col_headers=cand_cols, row_headers=OBJECTIVES,
-        matrix=stds.T, fmt="{:.2f}", row_label="objective",
+        col_headers=cand_cols,
+        row_headers=OBJECTIVES,
+        matrix=stds.T,
+        fmt="{:.2f}",
+        row_label="objective",
         save_path=OUT_DIR / "10_gp_std.txt",
     )
     return mus, stds
@@ -277,13 +321,17 @@ def _stage5_hard_constraints(P: np.ndarray) -> dict[str, bool]:
     ratio_str = ", ".join(f"{r:.3f}" for r in ratios)
     check_result(
         f"ratio cetearyl/PEG in [{RATIO_MIN:.2f}, {RATIO_MAX:.2f}]",
-        ok_ratio, f"ratios = [{ratio_str}]",
+        ok_ratio,
+        f"ratios = [{ratio_str}]",
     )
     return {"sum": ok_sum, "bounds": ok_bounds, "ratio": ok_ratio}
 
 
 def _stage6_metrics(
-    P: np.ndarray, Y_train: np.ndarray, mus: np.ndarray, stds: np.ndarray,
+    P: np.ndarray,
+    Y_train: np.ndarray,
+    mus: np.ndarray,
+    stds: np.ndarray,
 ) -> None:
     section("Stage 6 - GP calibration and goal compliance")
     Yp_true = forward(P)
@@ -296,7 +344,9 @@ def _stage6_metrics(
         "GP posterior vs forward-model truth at predicted points",
         col_headers=["MAE", "RMSE", "mean |z|"],
         row_headers=OBJECTIVES,
-        matrix=np.array(cal_rows), fmt="{:.4g}", row_label="objective",
+        matrix=np.array(cal_rows),
+        fmt="{:.4g}",
+        row_label="objective",
         save_path=OUT_DIR / "11_gp_calibration.txt",
     )
 
@@ -308,13 +358,19 @@ def _stage6_metrics(
     n = Yp_true.shape[0]
     print(f"    viscosity in [{VISC_LO:.0f}, {VISC_HI:.0f}]: {int(in_band.sum())}/{n}")
 
-    best_train = np.array([
-        np.abs(Y_train[:, 0] - VISC_IDEAL).min() + VISC_IDEAL,
-        Y_train[:, 1].max(), Y_train[:, 2].max(), Y_train[:, 3].min(),
-    ])
+    best_train = np.array(
+        [
+            np.abs(Y_train[:, 0] - VISC_IDEAL).min() + VISC_IDEAL,
+            Y_train[:, 1].max(),
+            Y_train[:, 2].max(),
+            Y_train[:, 3].min(),
+        ]
+    )
     score = (
         np.abs(Yp_true[:, 0] - VISC_IDEAL) / VISC_IDEAL
-        - 0.3 * Yp_true[:, 1] - 0.02 * Yp_true[:, 2] + 0.005 * Yp_true[:, 3]
+        - 0.3 * Yp_true[:, 1]
+        - 0.02 * Yp_true[:, 2]
+        + 0.005 * Yp_true[:, 3]
     )
     best_pred = Yp_true[int(np.argmin(score))]
     render_table(
@@ -322,7 +378,8 @@ def _stage6_metrics(
         col_headers=["best_train", "best_pred", "delta"],
         row_headers=OBJECTIVES,
         matrix=np.stack([best_train, best_pred, best_pred - best_train], axis=1),
-        fmt="{:.3f}", row_label="objective",
+        fmt="{:.3f}",
+        row_label="objective",
         save_path=OUT_DIR / "12_best_vs_best.txt",
     )
 
@@ -336,14 +393,16 @@ def _stage7_visual(P: np.ndarray, Y_train: np.ndarray) -> None:
     gs = fig.add_gridspec(2, 4, hspace=0.55, wspace=0.35)
 
     obj_info = [
-        ("viscosity_cP",   "band",  VISC_LO, VISC_HI, VISC_IDEAL, f"ideal {VISC_IDEAL:.0f}"),
-        ("spreadability",  "max",   None,    None,    None,       "higher is better"),
-        ("stability_days", "max",   None,    None,    None,       "higher is better"),
-        ("cost_per_kg",    "min",   None,    None,    None,       "lower is better"),
+        ("viscosity_cP", "band", VISC_LO, VISC_HI, VISC_IDEAL, f"ideal {VISC_IDEAL:.0f}"),
+        ("spreadability", "max", None, None, None, "higher is better"),
+        ("stability_days", "max", None, None, None, "higher is better"),
+        ("cost_per_kg", "min", None, None, None, "lower is better"),
     ]
     score = (
         np.abs(Yp_true[:, 0] - VISC_IDEAL) / VISC_IDEAL
-        - 0.3 * Yp_true[:, 1] - 0.02 * Yp_true[:, 2] + 0.005 * Yp_true[:, 3]
+        - 0.3 * Yp_true[:, 1]
+        - 0.02 * Yp_true[:, 2]
+        + 0.005 * Yp_true[:, 3]
     )
     best_pred_idx = int(np.argmin(score))
     for k, (name, kind, lo, hi, ideal, subtitle) in enumerate(obj_info):
@@ -367,8 +426,11 @@ def _stage7_visual(P: np.ndarray, Y_train: np.ndarray) -> None:
     bar_x = np.arange(len(order))
     bottoms = np.zeros(len(order))
     phase_colors = {
-        "aqueous": "#4c9ed9", "oil": "#f2b134", "emulsifier": "#b480d8",
-        "active": "#78c66a", "functional": "#e96d6d",
+        "aqueous": "#4c9ed9",
+        "oil": "#f2b134",
+        "emulsifier": "#b480d8",
+        "active": "#78c66a",
+        "functional": "#e96d6d",
     }
     for phase, ing_names in PHASE_GROUPS.items():
         phase_total = np.zeros(len(order))
@@ -378,8 +440,9 @@ def _stage7_visual(P: np.ndarray, Y_train: np.ndarray) -> None:
         ax_bottom.bar(bar_x, phase_total, bottom=bottoms, label=phase, color=phase_colors[phase])
         for j, v in enumerate(phase_total):
             if v > 0.04:
-                ax_bottom.text(bar_x[j], bottoms[j] + v / 2, f"{v * 100:.1f}%",
-                               ha="center", va="center", fontsize=9, color="black")
+                ax_bottom.text(
+                    bar_x[j], bottoms[j] + v / 2, f"{v * 100:.1f}%", ha="center", va="center", fontsize=9, color="black"
+                )
         bottoms += phase_total
     ax_bottom.set_xticks(bar_x)
     ax_bottom.set_xticklabels([f"top #{k + 1}" for k in range(len(order))])
@@ -406,12 +469,8 @@ def main() -> None:
     _stage1_inputs(X, Y)
     _stage2_spec()
 
-    params = [
-        {"name": n, "type": "float", "min": ING_BOUNDS[n][0], "max": ING_BOUNDS[n][1]}
-        for n in INGREDIENTS
-    ] + [
-        {"name": n, "type": "float", "min": PROC_BOUNDS[n][0], "max": PROC_BOUNDS[n][1]}
-        for n in PROCESS
+    params = [{"name": n, "type": "float", "min": ING_BOUNDS[n][0], "max": ING_BOUNDS[n][1]} for n in INGREDIENTS] + [
+        {"name": n, "type": "float", "min": PROC_BOUNDS[n][0], "max": PROC_BOUNDS[n][1]} for n in PROCESS
     ]
 
     payload = {
@@ -421,8 +480,11 @@ def main() -> None:
             "viscosity_cP": {
                 "goal": "within_range",
                 "range": {
-                    "min": VISC_LO, "max": VISC_HI, "ideal": VISC_IDEAL,
-                    "weight": 1.0, "ideal_weight": 0.5,
+                    "min": VISC_LO,
+                    "max": VISC_HI,
+                    "ideal": VISC_IDEAL,
+                    "weight": 1.0,
+                    "ideal_weight": 0.5,
                 },
             },
             "spreadability": {"goal": "max"},

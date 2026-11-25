@@ -155,9 +155,7 @@ def render_table(
     print(f"\n{title}:")
     if arr.shape[1] > max_cols_console:
         truncated_cols = col_headers[:max_cols_console] + ["..."]
-        trunc_mat = np.concatenate(
-            [arr[:, :max_cols_console], np.full((arr.shape[0], 1), np.nan)], axis=1
-        )
+        trunc_mat = np.concatenate([arr[:, :max_cols_console], np.full((arr.shape[0], 1), np.nan)], axis=1)
         truncated = _format_table(truncated_cols, row_headers, trunc_mat, fmt, row_label=row_label)
         print(truncated)
         if save_path is not None:
@@ -237,9 +235,7 @@ def check_ratio(
     return ok, r
 
 
-def gp_calibration(
-    gp_mean: np.ndarray, gp_std: np.ndarray, truth: np.ndarray
-) -> dict[str, float]:
+def gp_calibration(gp_mean: np.ndarray, gp_std: np.ndarray, truth: np.ndarray) -> dict[str, float]:
     """Return basic GP-vs-truth stats: MAE, RMSE, mean |z| where z = (y - mean)/std."""
     err = truth - gp_mean
     mae = float(np.mean(np.abs(err)))
@@ -261,4 +257,5 @@ def mpl_setup():
         pass
     import matplotlib.pyplot as plt  # noqa: F401
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
     return plt

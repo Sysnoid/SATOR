@@ -40,8 +40,27 @@ def run_reconstruct_payload(payload: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "feasible": False, "on_target": False, "error": "Missing PCA components in pca_info"}
 
     scale = None
-    if request.pca_info and request.pca_info.scaler_scale:
+    x_reference = None
+    if (
+        request.pca_info
+        and request.pca_info.scaler_scale
+        and request.pca_info.scaler_mean
+        and components is not None
+        and mean is not None
+    ):
+        from ..core.optimizer.preprocess import scaled_pca_inverse
+
         scale = np.array(request.pca_info.scaler_scale, dtype=float)
+        x_reference = scaled_pca_inverse(
+            coords_nat,
+            components,
+            mean,
+            np.array(request.pca_info.scaler_mean, dtype=float),
+            scale,
+        )
+    variable_bounds = None
+    if request.variable_bounds:
+        variable_bounds = [(float(a), float(b)) for a, b in request.variable_bounds]
     res = slsqp_reconstruct(
         target_encoded=coords_nat,
         encoder_components=components,
@@ -55,6 +74,10 @@ def run_reconstruct_payload(payload: dict[str, Any]) -> dict[str, Any]:
         ingredient_names=request.ingredient_names,
         parameter_names=request.parameter_names,
         scaler_scale=scale,
+        x_reference=x_reference,
+        sum_groups=request.sum_groups,
+        variable_bounds=variable_bounds,
+        column_names=request.column_names,
     )
     out_form = {
         "ingredients": res["ingredients"],

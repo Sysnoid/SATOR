@@ -56,13 +56,13 @@ PROCESS = ["compaction_kN", "blend_min"]
 OBJECTIVES = ["dissolution_30min", "hardness_N", "friability_pct", "disintegration_s"]
 
 ING_BOUNDS = {
-    "API":            (0.05,  0.30),
-    "lactose":        (0.10,  0.70),
-    "MCC":            (0.05,  0.40),
-    "croscarmellose": (0.01,  0.06),
-    "PVP_K30":        (0.01,  0.06),
-    "Mg_stearate":    (0.002, 0.020),
-    "silica":         (0.001, 0.010),
+    "API": (0.05, 0.30),
+    "lactose": (0.10, 0.70),
+    "MCC": (0.05, 0.40),
+    "croscarmellose": (0.01, 0.06),
+    "PVP_K30": (0.01, 0.06),
+    "Mg_stearate": (0.002, 0.020),
+    "silica": (0.001, 0.010),
 }
 PROC_BOUNDS = {"compaction_kN": (5.0, 25.0), "blend_min": (5.0, 20.0)}
 
@@ -132,12 +132,8 @@ def _bilinear(ax_x: np.ndarray, ax_y: np.ndarray, M: np.ndarray, pts: np.ndarray
 
 
 def _build_payload(X: np.ndarray, Y: np.ndarray) -> dict:
-    params = [
-        {"name": n, "type": "float", "min": ING_BOUNDS[n][0], "max": ING_BOUNDS[n][1]}
-        for n in INGREDIENTS
-    ] + [
-        {"name": n, "type": "float", "min": PROC_BOUNDS[n][0], "max": PROC_BOUNDS[n][1]}
-        for n in PROCESS
+    params = [{"name": n, "type": "float", "min": ING_BOUNDS[n][0], "max": ING_BOUNDS[n][1]} for n in INGREDIENTS] + [
+        {"name": n, "type": "float", "min": PROC_BOUNDS[n][0], "max": PROC_BOUNDS[n][1]} for n in PROCESS
     ]
     return {
         "dataset": {"X": X.tolist(), "Y": Y.tolist()},
@@ -147,8 +143,11 @@ def _build_payload(X: np.ndarray, Y: np.ndarray) -> dict:
             "hardness_N": {
                 "goal": "within_range",
                 "range": {
-                    "min": HARDNESS_LO, "max": HARDNESS_HI, "ideal": HARDNESS_IDEAL,
-                    "weight": 1.0, "ideal_weight": 0.5,
+                    "min": HARDNESS_LO,
+                    "max": HARDNESS_HI,
+                    "ideal": HARDNESS_IDEAL,
+                    "weight": 1.0,
+                    "ideal_weight": 0.5,
                 },
             },
             "friability_pct": {
@@ -187,29 +186,37 @@ def _stage1_inputs(X: np.ndarray, Y: np.ndarray) -> None:
     W = X[:, : len(INGREDIENTS)].T
     render_table(
         "Ingredient mass fractions (ingredient x sample)",
-        col_headers=sample_cols, row_headers=INGREDIENTS, matrix=W,
-        fmt="{:.4f}", row_label="ingredient",
+        col_headers=sample_cols,
+        row_headers=INGREDIENTS,
+        matrix=W,
+        fmt="{:.4f}",
+        row_label="ingredient",
         save_path=OUT_DIR / "01_ingredients.txt",
     )
 
-    P = X[:, len(INGREDIENTS):].T
+    P = X[:, len(INGREDIENTS) :].T
     render_table(
         "Process parameters (parameter x sample)",
-        col_headers=sample_cols, row_headers=PROCESS, matrix=P,
-        fmt="{:.2f}", row_label="parameter",
+        col_headers=sample_cols,
+        row_headers=PROCESS,
+        matrix=P,
+        fmt="{:.2f}",
+        row_label="parameter",
         save_path=OUT_DIR / "02_parameters.txt",
     )
 
     render_table(
         "Measured objective values (objective x sample)",
-        col_headers=sample_cols, row_headers=OBJECTIVES, matrix=Y.T,
-        fmt="{:.2f}", row_label="objective",
+        col_headers=sample_cols,
+        row_headers=OBJECTIVES,
+        matrix=Y.T,
+        fmt="{:.2f}",
+        row_label="objective",
         save_path=OUT_DIR / "03_objectives.txt",
     )
 
     marked = [f"{n} *" for n in OBJECTIVES]
-    print("\n  * all four objectives are optimization targets "
-          "(see Stage 2 for goals/limits).")
+    print("\n  * all four objectives are optimization targets (see Stage 2 for goals/limits).")
     _ = marked
 
 
@@ -239,9 +246,7 @@ def _stage2_spec() -> None:
     for name in PROCESS:
         lo, hi = PROC_BOUNDS[name]
         constraints.append((f"bound {name}", f"[{lo:g}, {hi:g}]"))
-    render_key_value_block(
-        "Constraints", constraints, save_path=OUT_DIR / "05_constraints.txt"
-    )
+    render_key_value_block("Constraints", constraints, save_path=OUT_DIR / "05_constraints.txt")
 
     render_key_value_block(
         "Engine config",
@@ -307,8 +312,10 @@ def _stage3_pca_results(
         render_table(
             "PCA loadings on z-score scaled features (feature x PC)",
             col_headers=[f"PC{k + 1}" for k in range(n_pc)],
-            row_headers=feature_names, matrix=scaled_components.T,
-            fmt="{:+.4f}", row_label="feature",
+            row_headers=feature_names,
+            matrix=scaled_components.T,
+            fmt="{:+.4f}",
+            row_label="feature",
             save_path=OUT_DIR / "08_pca_loadings.txt",
         )
         print(
@@ -320,8 +327,10 @@ def _stage3_pca_results(
         render_table(
             "PCA component loadings (feature x PC)",
             col_headers=[f"PC{k + 1}" for k in range(n_pc)],
-            row_headers=feature_names, matrix=components.T,
-            fmt="{:+.4f}", row_label="feature",
+            row_headers=feature_names,
+            matrix=components.T,
+            fmt="{:+.4f}",
+            row_label="feature",
             save_path=OUT_DIR / "08_pca_loadings.txt",
         )
 
@@ -330,14 +339,18 @@ def _stage3_pca_results(
         "Training samples in PCA space - raw (PC x sample)",
         col_headers=sample_cols,
         row_headers=[f"PC{k + 1}" for k in range(n_pc)],
-        matrix=Z_raw.T, fmt="{:+.4f}", row_label="PC",
+        matrix=Z_raw.T,
+        fmt="{:+.4f}",
+        row_label="PC",
         save_path=OUT_DIR / "09_training_pca_raw.txt",
     )
     render_table(
         "Training samples in PCA space - normalized [0,1] (PC x sample)",
         col_headers=sample_cols,
         row_headers=[f"PC{k + 1}" for k in range(n_pc)],
-        matrix=Z_norm.T, fmt="{:.4f}", row_label="PC",
+        matrix=Z_norm.T,
+        fmt="{:.4f}",
+        row_label="PC",
         save_path=OUT_DIR / "09b_training_pca_normalized.txt",
     )
 
@@ -381,13 +394,28 @@ def _stage4_gp_surfaces(
         S = np.sqrt(np.maximum(V, 0.0))
 
         ax = axes[0, k]
-        im = ax.imshow(M, origin="lower", aspect="auto",
-                       extent=[xax[0], xax[-1], yax[0], yax[-1]], cmap="viridis")
+        im = ax.imshow(M, origin="lower", aspect="auto", extent=[xax[0], xax[-1], yax[0], yax[-1]], cmap="viridis")
         fig.colorbar(im, ax=ax, label=obj)
-        ax.scatter(Z_train_norm[:, 0], Z_train_norm[:, 1], s=20, c=Y_train[:, k],
-                   cmap="magma", edgecolor="black", linewidth=0.4, label="train (true)")
-        ax.scatter(Zp_norm[:, 0], Zp_norm[:, 1], s=110, c="red", marker="X",
-                   edgecolor="white", linewidth=1.2, label="predicted")
+        ax.scatter(
+            Z_train_norm[:, 0],
+            Z_train_norm[:, 1],
+            s=20,
+            c=Y_train[:, k],
+            cmap="magma",
+            edgecolor="black",
+            linewidth=0.4,
+            label="train (true)",
+        )
+        ax.scatter(
+            Zp_norm[:, 0],
+            Zp_norm[:, 1],
+            s=110,
+            c="red",
+            marker="X",
+            edgecolor="white",
+            linewidth=1.2,
+            label="predicted",
+        )
         ax.set_xlabel("PC1 (norm)")
         ax.set_ylabel("PC2 (norm)")
         ax.set_title(f"mean  {obj}")
@@ -395,13 +423,10 @@ def _stage4_gp_surfaces(
             ax.legend(loc="upper right", fontsize=8)
 
         ax2 = axes[1, k]
-        im2 = ax2.imshow(S, origin="lower", aspect="auto",
-                         extent=[xax[0], xax[-1], yax[0], yax[-1]], cmap="magma")
+        im2 = ax2.imshow(S, origin="lower", aspect="auto", extent=[xax[0], xax[-1], yax[0], yax[-1]], cmap="magma")
         fig.colorbar(im2, ax=ax2, label=f"std({obj})")
-        ax2.scatter(Z_train_norm[:, 0], Z_train_norm[:, 1], s=18, c="white",
-                    edgecolor="black", linewidth=0.4)
-        ax2.scatter(Zp_norm[:, 0], Zp_norm[:, 1], s=110, c="red", marker="X",
-                    edgecolor="white", linewidth=1.2)
+        ax2.scatter(Z_train_norm[:, 0], Z_train_norm[:, 1], s=18, c="white", edgecolor="black", linewidth=0.4)
+        ax2.scatter(Zp_norm[:, 0], Zp_norm[:, 1], s=110, c="red", marker="X", edgecolor="white", linewidth=1.2)
         ax2.set_xlabel("PC1 (norm)")
         ax2.set_ylabel("PC2 (norm)")
         ax2.set_title(f"std  {obj}")
@@ -420,7 +445,9 @@ def _stage5_predictions_pca(preds: list[dict]) -> None:
         "Predicted candidates in PCA space (PC x candidate) [normalized 0..1]",
         col_headers=cand_cols,
         row_headers=[f"PC{k + 1}" for k in range(Zp.shape[1])],
-        matrix=Zp.T, fmt="{:+.4f}", row_label="PC",
+        matrix=Zp.T,
+        fmt="{:+.4f}",
+        row_label="PC",
         save_path=OUT_DIR / "10_predictions_pca.txt",
     )
 
@@ -428,14 +455,20 @@ def _stage5_predictions_pca(preds: list[dict]) -> None:
     stds = np.sqrt(np.maximum(np.array([p["variances"] for p in preds]), 0.0))
     render_table(
         "GP posterior mean per objective (objective x candidate)",
-        col_headers=cand_cols, row_headers=OBJECTIVES, matrix=means.T,
-        fmt="{:.3f}", row_label="objective",
+        col_headers=cand_cols,
+        row_headers=OBJECTIVES,
+        matrix=means.T,
+        fmt="{:.3f}",
+        row_label="objective",
         save_path=OUT_DIR / "11_predictions_gp_mean.txt",
     )
     render_table(
         "GP posterior std per objective (objective x candidate)",
-        col_headers=cand_cols, row_headers=OBJECTIVES, matrix=stds.T,
-        fmt="{:.3f}", row_label="objective",
+        col_headers=cand_cols,
+        row_headers=OBJECTIVES,
+        matrix=stds.T,
+        fmt="{:.3f}",
+        row_label="objective",
         save_path=OUT_DIR / "12_predictions_gp_std.txt",
     )
 
@@ -449,32 +482,44 @@ def _stage6_predictions_reconstructed(preds: list[dict]) -> np.ndarray:
 
     render_table(
         "Reconstructed ingredient mass fractions (ingredient x candidate)",
-        col_headers=cand_cols, row_headers=INGREDIENTS,
+        col_headers=cand_cols,
+        row_headers=INGREDIENTS,
         matrix=P[:, : len(INGREDIENTS)].T,
-        fmt="{:.4f}", row_label="ingredient",
+        fmt="{:.4f}",
+        row_label="ingredient",
         save_path=OUT_DIR / "13_predictions_ingredients.txt",
     )
     render_table(
         "Reconstructed process parameters (parameter x candidate)",
-        col_headers=cand_cols, row_headers=PROCESS,
-        matrix=P[:, len(INGREDIENTS):].T,
-        fmt="{:.2f}", row_label="parameter",
+        col_headers=cand_cols,
+        row_headers=PROCESS,
+        matrix=P[:, len(INGREDIENTS) :].T,
+        fmt="{:.2f}",
+        row_label="parameter",
         save_path=OUT_DIR / "14_predictions_parameters.txt",
     )
     return P
 
 
 def _stage7_metrics(
-    X: np.ndarray, Y: np.ndarray, P: np.ndarray, preds: list[dict],
-    components: np.ndarray, mean: np.ndarray,
+    X: np.ndarray,
+    Y: np.ndarray,
+    P: np.ndarray,
+    preds: list[dict],
+    components: np.ndarray,
+    mean: np.ndarray,
     scaler_mean: np.ndarray | None = None,
     scaler_scale: np.ndarray | None = None,
 ) -> dict[str, bool]:
     section("Stage 7 - Correctness checks and metrics")
 
     Z = (X - mean) @ components.T
-    if (scaler_mean is not None and scaler_scale is not None
-            and scaler_mean.size == X.shape[1] and scaler_scale.size == X.shape[1]):
+    if (
+        scaler_mean is not None
+        and scaler_scale is not None
+        and scaler_mean.size == X.shape[1]
+        and scaler_scale.size == X.shape[1]
+    ):
         # Correct inverse for the ScaledPCA wrapper: Z was computed in the
         # space of z-score scaled features, so the reconstruction has to
         # unscale after projecting back through sklearn's components.
@@ -491,14 +536,13 @@ def _stage7_metrics(
         col_headers=["rmse"],
         row_headers=INGREDIENTS + PROCESS,
         matrix=feat_rmse.reshape(-1, 1),
-        fmt="{:.4g}", row_label="feature",
+        fmt="{:.4g}",
+        row_label="feature",
         save_path=OUT_DIR / "15_pca_reconstruction_rmse.txt",
     )
     print(f"  aggregate |X - X_rec|: mean={np.mean(np.abs(err)):.4g}  max={np.max(np.abs(err)):.4g}")
 
-    slsqp_flags = np.array(
-        [bool(p.get("reconstructed", {}).get("success", True)) for p in preds]
-    )
+    slsqp_flags = np.array([bool(p.get("reconstructed", {}).get("success", True)) for p in preds])
     n_feasible = int(slsqp_flags.sum())
     n_total = int(len(slsqp_flags))
     print(
@@ -509,9 +553,7 @@ def _stage7_metrics(
         "\n  separately - the engine flagged them via reconstructed.success=False."
     )
 
-    print(
-        "\n  Hard-constraint satisfaction on FEASIBLE predictions (must all PASS):"
-    )
+    print("\n  Hard-constraint satisfaction on FEASIBLE predictions (must all PASS):")
     ing_indices = list(range(len(INGREDIENTS)))
     P_feas = P[slsqp_flags] if n_feasible > 0 else P[:0]
     if n_feasible == 0:
@@ -529,7 +571,8 @@ def _stage7_metrics(
         ok_bounds, bviol = check_bounds(P_feas, all_bounds)
         viol_count = sum(len(v) for v in bviol)
         check_result(
-            "all values within [min, max] bounds", ok_bounds,
+            "all values within [min, max] bounds",
+            ok_bounds,
             f"{viol_count} field(s) out of bounds",
         )
 
@@ -537,7 +580,8 @@ def _stage7_metrics(
         ratio_str = ", ".join(f"{r:.3f}" for r in ratios)
         check_result(
             f"ratio MCC/lactose in [{RATIO_MIN:.2f}, {RATIO_MAX:.2f}]",
-            ok_ratio, f"ratios = [{ratio_str}]",
+            ok_ratio,
+            f"ratios = [{ratio_str}]",
         )
 
     Yp_true = forward(P)
@@ -551,7 +595,9 @@ def _stage7_metrics(
         "GP posterior vs forward-model truth at predicted points",
         col_headers=["MAE", "RMSE", "mean |z|"],
         row_headers=OBJECTIVES,
-        matrix=np.array(cal_rows), fmt="{:.4g}", row_label="objective",
+        matrix=np.array(cal_rows),
+        fmt="{:.4g}",
+        row_label="objective",
         save_path=OUT_DIR / "16_gp_calibration.txt",
     )
 
@@ -577,12 +623,14 @@ def _stage7_metrics(
     )
 
     best_train = np.array([Y[:, 0].max(), HARDNESS_IDEAL, Y[:, 2].min(), Y[:, 3].min()])
-    idx = int(np.argmin(
-        -Yp_true[:, 0] / 100.0
-        + 0.03 * np.abs(Yp_true[:, 1] - HARDNESS_IDEAL)
-        + 1.5 * Yp_true[:, 2]
-        + 0.002 * Yp_true[:, 3]
-    ))
+    idx = int(
+        np.argmin(
+            -Yp_true[:, 0] / 100.0
+            + 0.03 * np.abs(Yp_true[:, 1] - HARDNESS_IDEAL)
+            + 1.5 * Yp_true[:, 2]
+            + 0.002 * Yp_true[:, 3]
+        )
+    )
     best_pred = Yp_true[idx]
     delta = best_pred - best_train
     render_table(
@@ -590,7 +638,8 @@ def _stage7_metrics(
         col_headers=["best_train", "best_pred", "delta"],
         row_headers=OBJECTIVES,
         matrix=np.stack([best_train, best_pred, delta], axis=1),
-        fmt="{:.3f}", row_label="objective",
+        fmt="{:.3f}",
+        row_label="objective",
         save_path=OUT_DIR / "17_best_training_vs_best_prediction.txt",
     )
     return {"sum": ok_sum, "bounds": ok_bounds, "ratio": ok_ratio}
@@ -600,25 +649,32 @@ def _stage8_extras(P: np.ndarray, Yp_true: np.ndarray, Y_train: np.ndarray) -> N
     section("Stage 8 - Visual extras")
     plt = mpl_setup()
 
-    best_train_row = np.array([
-        Y_train[:, 0].max(), HARDNESS_IDEAL, Y_train[:, 2].min(), Y_train[:, 3].min(),
-    ])
-    idx = int(np.argmin(
-        -Yp_true[:, 0] / 100.0
-        + 0.03 * np.abs(Yp_true[:, 1] - HARDNESS_IDEAL)
-        + 1.5 * Yp_true[:, 2]
-        + 0.002 * Yp_true[:, 3]
-    ))
+    best_train_row = np.array(
+        [
+            Y_train[:, 0].max(),
+            HARDNESS_IDEAL,
+            Y_train[:, 2].min(),
+            Y_train[:, 3].min(),
+        ]
+    )
+    idx = int(
+        np.argmin(
+            -Yp_true[:, 0] / 100.0
+            + 0.03 * np.abs(Yp_true[:, 1] - HARDNESS_IDEAL)
+            + 1.5 * Yp_true[:, 2]
+            + 0.002 * Yp_true[:, 3]
+        )
+    )
     best_pred_row = Yp_true[idx]
 
     fig = plt.figure(figsize=(14, 6.5), dpi=110)
     gs = fig.add_gridspec(2, 4, hspace=0.55, wspace=0.35)
 
     obj_info = [
-        ("dissolution_30min", "max",        None,           None,             None, "higher is better"),
-        ("hardness_N",        "band",       HARDNESS_LO,    HARDNESS_HI,      HARDNESS_IDEAL, f"ideal {HARDNESS_IDEAL:.0f}"),
-        ("friability_pct",    "below",      None,           FRIABILITY_MAX,   None, f"<= {FRIABILITY_MAX:.2f}"),
-        ("disintegration_s",  "below",      None,           DISINTEGRATION_MAX, None, f"<= {DISINTEGRATION_MAX:.0f}"),
+        ("dissolution_30min", "max", None, None, None, "higher is better"),
+        ("hardness_N", "band", HARDNESS_LO, HARDNESS_HI, HARDNESS_IDEAL, f"ideal {HARDNESS_IDEAL:.0f}"),
+        ("friability_pct", "below", None, FRIABILITY_MAX, None, f"<= {FRIABILITY_MAX:.2f}"),
+        ("disintegration_s", "below", None, DISINTEGRATION_MAX, None, f"<= {DISINTEGRATION_MAX:.0f}"),
     ]
     for k, (name, kind, lo, hi, ideal, subtitle) in enumerate(obj_info):
         ax = fig.add_subplot(gs[0, k])
@@ -644,9 +700,18 @@ def _stage8_extras(P: np.ndarray, Yp_true: np.ndarray, Y_train: np.ndarray) -> N
     ing_x = np.arange(len(INGREDIENTS))
     best_pred_composition = P[idx, : len(INGREDIENTS)]
     pred_median = np.median(P[:, : len(INGREDIENTS)], axis=0)
-    train_median = np.median(np.array([
-        forward(np.zeros((0, P.shape[1])))  # placeholder
-    ]).reshape(0, 0), axis=0) if False else np.zeros(len(INGREDIENTS))
+    train_median = (
+        np.median(
+            np.array(
+                [
+                    forward(np.zeros((0, P.shape[1])))  # placeholder
+                ]
+            ).reshape(0, 0),
+            axis=0,
+        )
+        if False
+        else np.zeros(len(INGREDIENTS))
+    )
     ax_bottom.bar(ing_x - 0.22, best_pred_composition, width=0.4, color="red", alpha=0.85, label="best pred recipe")
     ax_bottom.bar(ing_x + 0.22, pred_median, width=0.4, color="gray", alpha=0.6, label="median of predictions")
     for i, name in enumerate(INGREDIENTS):
@@ -684,9 +749,7 @@ def main() -> None:
 
     encoding_info = result.get("encoding_info") or {}
     encoded_dataset = result.get("encoded_dataset")
-    components, mean, pc_mins, pc_maxs = _stage3_pca_results(
-        X, encoding_info, encoded_dataset
-    )
+    components, mean, pc_mins, pc_maxs = _stage3_pca_results(X, encoding_info, encoded_dataset)
 
     pc_range = np.maximum(pc_maxs - pc_mins, 1e-12)
     Z_raw = (X - mean) @ components.T
@@ -699,7 +762,12 @@ def main() -> None:
     scaler_mean = np.asarray(encoding_info.get("scaler_mean", []), dtype=float)
     scaler_scale = np.asarray(encoding_info.get("scaler_scale", []), dtype=float)
     checks = _stage7_metrics(
-        X, Y, P, preds, components, mean,
+        X,
+        Y,
+        P,
+        preds,
+        components,
+        mean,
         scaler_mean=scaler_mean if scaler_mean.size else None,
         scaler_scale=scaler_scale if scaler_scale.size else None,
     )
@@ -707,18 +775,17 @@ def main() -> None:
     Yp_true = forward(P)
     _stage8_extras(P, Yp_true, Y)
 
-    n_feas = sum(
-        1 for p in preds if bool(p.get("reconstructed", {}).get("success", True))
-    )
+    n_feas = sum(1 for p in preds if bool(p.get("reconstructed", {}).get("success", True)))
     section("Final verdict", ch="*")
     failed = [k for k, ok in checks.items() if not ok]
     if failed:
-        print(f"  {len(failed)} HARD-constraint check(s) FAILED on feasible"
-              f" predictions: {failed}")
+        print(f"  {len(failed)} HARD-constraint check(s) FAILED on feasible predictions: {failed}")
         print("  This indicates an engine correctness problem - see stage 7 output.")
     else:
-        print(f"  All hard-constraint checks PASSED on the {n_feas}/{len(preds)}"
-              " feasible predictions (sum, bounds, ratio).")
+        print(
+            f"  All hard-constraint checks PASSED on the {n_feas}/{len(preds)}"
+            " feasible predictions (sum, bounds, ratio)."
+        )
         if n_feas < len(preds):
             print(f"  {len(preds) - n_feas} prediction(s) had reconstructed.success=False")
             print("  and were returned as best-effort; this is a normal signal that")

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **Verification follow-up:** PCA acquisition searches in the original variables and evaluates the GP on the encoding of that point, so `encoded` matches `encoded_actual`. `pca_margin` now defaults to 0. `/v1/reconstruct` uses the scaled-PCA inverse when scaler fields are present, and its default tolerance is 1e-3. GP min-max normalization uses the data envelope widened by 10% of the search box. Three-objective batches use qLogNEHVI with caching instead of forced sequential EHVI. Identical PCA rows are a 422. Ratio constraints accept an optional `min_denominator`. Validation errors no longer echo the request body.
+- **Lab mode:** `acquisition: "auto"` selects qLogNEI / qLogNEHVI when `mode` is `lab`, and qLogEI / qLogEHVI in `throughput` unless the data carries known noise. `dataset.Yvar` and replicate rows train a fixed-noise GP. `dataset.failed` trains a feasibility model used as an acquisition constraint. Objectives accept `outcome_constraint: {lower, upper}`. `POST /v1/design` returns a Sobol design projected onto sums, ratios, and an optional cardinality limit. `ingredient_rules` applies that cardinality during optimization. `mixture_transform: "ilr"` fits sum groups in isometric log-ratio coordinates. Small categorical spaces use a mixed GP.
 - **Correctness:** one sign convention for `max` / `maximize` / `min` / `minimize`
   and the threshold spellings. Threshold goals (`minimize_below`,
   `maximize_above`, `maximize_below`, `minimize_above`) are BoTorch outcome
@@ -19,8 +21,7 @@ All notable changes to this project will be documented in this file.
 - **PCA:** reconstruction uses the original column order and every sum group,
   projects onto the feasible set, and reports `success` only when the recipe
   is feasible and on the latent target. Degenerate components are dropped
-  (`k_effective`). `pca_dimension: "auto"` and `pca_margin` (default 0.2) widen
-  the latent box. Predictions are scored at the encoding of the returned recipe.
+  (`k_effective`). `pca_dimension: "auto"` selects the latent size. Predictions are scored at the encoding of the returned recipe.
 - **Runtime:** optimize and reconstruct jobs run in a child process. A timeout
   terminates that process, and the result queue is drained while the child
   is alive so large results cannot deadlock the worker.

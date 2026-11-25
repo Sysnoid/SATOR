@@ -56,7 +56,9 @@ def test_multi_objective_acquisition_class_by_name(monkeypatch: pytest.MonkeyPat
     )
     captured: dict = {}
 
-    def fake_optimize_acqf(acqf, bounds, q, num_restarts, raw_samples, inequality_constraints=None, options=None, **kwargs):
+    def fake_optimize_acqf(
+        acqf, bounds, q, num_restarts, raw_samples, inequality_constraints=None, options=None, **kwargs
+    ):
         captured["type"] = type(acqf).__name__
         d_model = bounds.shape[1]
         return torch.full((q, d_model), 0.5, dtype=tdtype), None

@@ -19,8 +19,11 @@ class ReconstructionRequest(BaseModel):
     pca_info: PCAInfo | None = None
     bounds: dict[str, Any]
     n_ingredients: int = Field(ge=0, default=0)
-    target_precision: float = Field(1e-7, gt=0)
+    target_precision: float = Field(1e-3, gt=0)
     sum_target: float = Field(1.0, gt=0)
+    sum_groups: list[dict[str, Any]] | None = None
+    variable_bounds: list[list[float]] | None = None
+    column_names: list[str] | None = None
     ratio_constraints: list[dict[str, float]] | None = None  # list of {i,j,min_ratio,max_ratio}
     ingredient_names: list[str] | None = None  # in order; length n_ingredients
     parameter_names: list[str] | None = None  # in order; length of bounds.parameters

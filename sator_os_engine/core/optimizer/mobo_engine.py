@@ -165,24 +165,43 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
     from .preprocess import enforce_sum_to_target_training, fit_pca_normalize, input_to_z_norm
 
     X_np = enforce_sum_to_target_training(X_np, sums_cfg)
+    from .observations import prepare_observations
+
+    yvar_raw = dataset.get("Yvar") if isinstance(dataset, dict) else None
+    failed_raw = dataset.get("failed") if isinstance(dataset, dict) else None
+    prepared = prepare_observations(X_np, Y_np, yvar_raw, failed_raw)
+    X_np = prepared["X"]
+    Y_np = prepared["Y"]
     y_finite = np.isfinite(Y_np)
     x_finite = np.isfinite(X_np).all(axis=1)
     dropped_rows = int(np.sum(~y_finite.all(axis=1) | ~x_finite))
     k_req = req.optimization_config.pca_dimension
     use_pca_model = bool(req.optimization_config.use_pca and k_req is not None)
+    mixture = str(getattr(cfg, "mixture_transform", None) or "none").strip().lower()
+    use_ilr = mixture == "ilr"
+    obj_cfgs = list(req.objectives.values()) if isinstance(req.objectives, dict) else []
+    obj_names = list(req.objectives.keys()) if isinstance(req.objectives, dict) else []
+    goals = [str(item.get("goal", "min")).lower() for item in obj_cfgs] if obj_cfgs else ["min"] * Y_np.shape[1]
+    encoder = None
     pca = None
     pc_mins = pc_maxs = pc_range = None
     Z = None
-    if use_pca_model:
+    if use_ilr:
+        from .mixture import MixtureEncoder
+        from .utils import PLAIN_DIRECTIONAL_GOALS, THRESHOLD_GOALS
+
+        allowed = PLAIN_DIRECTIONAL_GOALS | THRESHOLD_GOALS
+        if any(goal not in allowed for goal in goals):
+            raise ValueError("mixture_transform 'ilr' supports min/max and threshold goals")
+        encoder = MixtureEncoder(sum_groups_from_config(req, X_np.shape[1]), X_np.shape[1])
+        X_model = encoder.forward(X_np)
+    elif use_pca_model:
         pca, pc_mins, pc_maxs, pc_range, Z = fit_pca_normalize(X_np, k_req)
         X_model = Z
     else:
         X_model = X_np
 
     tX = torch.tensor(X_model, dtype=tdtype, device=tdevice)
-    obj_cfgs = list(req.objectives.values()) if isinstance(req.objectives, dict) else []
-    obj_names = list(req.objectives.keys()) if isinstance(req.objectives, dict) else []
-    goals = [str(item.get("goal", "min")).lower() for item in obj_cfgs] if obj_cfgs else ["min"] * Y_np.shape[1]
     signs = np.array([training_sign(g) for g in goals], dtype=float)
     tY = torch.tensor(np.where(np.isfinite(Y_np), Y_np, 0.0) * signs, dtype=tdtype, device=tdevice)
     n_obj = tY.shape[-1]
@@ -193,20 +212,71 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
 
     bounds_input = gp_bounds_input(params, tdtype, tdevice)
     margin = float(getattr(cfg, "pca_margin", 0.0) or 0.0)
-    if use_pca_model and pca is not None:
+    if use_ilr and encoder is not None:
+        box = encoder.bounds(X_model)
+        bounds_model = torch.tensor(box, dtype=tdtype, device=tdevice)
+        model_bounds = bounds_model
+    elif use_pca_model and pca is not None:
         bounds_model = bounds_model_pca(X_model.shape[1], tdtype, tdevice, margin=margin)
         model_bounds = bounds_model
     else:
         bounds_model = bounds_input
         model_bounds = bounds_input
-    model = build_models(tX, tY, cfg, bounds=model_bounds, row_masks=row_masks)
+    from .acquisition import _categorical_fixed_features
+
+    cat_dims = [i for i, param in enumerate(params) if param.get("type") == "categorical"]
+    use_mixed = bool(cat_dims) and not use_pca_model and not use_ilr
+    if use_mixed and _categorical_fixed_features(params, len(params)) is None:
+        use_mixed = False
+    yvar_t = None
+    if prepared["Yvar"] is not None:
+        yvar_t = torch.tensor(prepared["Yvar"], dtype=tdtype, device=tdevice)
+    feas_t = None
+    if prepared["feasibility"] is not None:
+        feas_t = torch.tensor(prepared["feasibility"], dtype=tdtype, device=tdevice)
+    model = build_models(
+        tX,
+        tY,
+        cfg,
+        bounds=model_bounds,
+        row_masks=row_masks,
+        train_Yvar=yvar_t,
+        feasibility=feas_t,
+        cat_dims=cat_dims if use_mixed else None,
+    )
+    pca_in_x = bool(use_pca_model and pca is not None)
+    acq_model = model
+    acq_bounds = bounds_model
+    acq_train = tX
+    acq_use_pca = use_pca_model
+    acq_pca = pca
+    if pca_in_x:
+        from botorch.models.model import ModelList
+
+        from .pca_model import PcaObservationModel
+
+        components_t = torch.tensor(np.asarray(pca.components_), dtype=tdtype, device=tdevice)
+        mean_t = torch.tensor(np.asarray(pca.mean_), dtype=tdtype, device=tdevice)
+        pc_mins_t = torch.tensor(np.asarray(pc_mins), dtype=tdtype, device=tdevice)
+        pc_range_t = torch.tensor(np.asarray(pc_range), dtype=tdtype, device=tdevice)
+        observed = [PcaObservationModel(sub, components_t, mean_t, pc_mins_t, pc_range_t) for sub in model.models]
+        # A single output stays a plain model so qLogEI can call posterior
+        # directly. Several outputs need a list so each posterior is evaluated
+        # at the same x and then encoded.
+        acq_model = observed[0] if len(observed) == 1 else ModelList(*observed)
+        acq_bounds = bounds_input
+        acq_train = torch.tensor(X_np, dtype=tdtype, device=tdevice)
+        acq_use_pca = False
+        acq_pca = None
 
     pending_raw = dataset.get("pending_X", dataset.get("X_pending")) if isinstance(dataset, dict) else None
     x_pending = None
     if pending_raw:
         pend = encode_dataset(pending_raw, params)
         pend, _ = clip_to_bounds(pend, params)
-        if use_pca_model and pca is not None:
+        if use_ilr and encoder is not None:
+            pend = encoder.forward(pend)
+        elif use_pca_model and pca is not None and not pca_in_x:
             pend = input_to_z_norm(pca, pc_mins, pc_range, pend)
         x_pending = torch.tensor(pend, dtype=tdtype, device=tdevice)
 
@@ -214,33 +284,34 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
 
     if n_obj == 1:
         cand = select_candidates_single_objective(
-            model=model,
+            model=acq_model,
             params=params,
             bounds_input=bounds_input,
-            bounds_model=bounds_model,
-            use_pca_model=use_pca_model,
-            pca=pca,
-            pc_mins=pc_mins if use_pca_model and pca is not None else None,
-            pc_range=pc_range if use_pca_model and pca is not None else None,
+            bounds_model=acq_bounds,
+            use_pca_model=acq_use_pca,
+            pca=acq_pca,
+            pc_mins=pc_mins if acq_use_pca and acq_pca is not None else None,
+            pc_range=pc_range if acq_use_pca and acq_pca is not None else None,
             n=num,
             rng_seed=rng_seed,
             tdtype=tdtype,
             tdevice=tdevice,
             req=req,
             Y_np=Y_np,
-            train_X=tX,
+            train_X=acq_train,
             X_pending=x_pending,
+            return_model_space=use_ilr,
         )
     else:
         cand = select_candidates_multiobjective(
-            model=model,
+            model=acq_model,
             params=params,
             bounds_input=bounds_input,
-            bounds_model=bounds_model,
-            use_pca_model=use_pca_model,
-            pca=pca,
-            pc_mins=pc_mins if use_pca_model and pca is not None else None,
-            pc_range=pc_range if use_pca_model and pca is not None else None,
+            bounds_model=acq_bounds,
+            use_pca_model=acq_use_pca,
+            pca=acq_pca,
+            pc_mins=pc_mins if acq_use_pca and acq_pca is not None else None,
+            pc_range=pc_range if acq_use_pca and acq_pca is not None else None,
             n=num,
             rng_seed=rng_seed,
             tdtype=tdtype,
@@ -248,37 +319,99 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
             req=req,
             goals=goals,
             Y_np=Y_np,
-            train_X=tX,
+            train_X=acq_train,
             X_pending=x_pending,
+            return_model_space=use_ilr,
         )
 
     preds: list[dict[str, Any]] = []
+    from .cardinality import apply_cardinality
+
     search_bounds = _parameter_bounds(params)
     groups = sum_groups_from_config(req, len(params))
     ratios = ratio_constraints_from_config(req)
+    rules = getattr(cfg, "ingredient_rules", None) or {}
+    max_nonzero = None if rules.get("max_nonzero") is None else int(rules["max_nonzero"])
+    min_dose = None if rules.get("min_dose") is None else float(rules["min_dose"])
+    supports = groups
+    if (max_nonzero is not None or min_dose is not None) and not groups:
+        ingredient_idx = [
+            i
+            for i, param in enumerate(params)
+            if param.get("type", "float") == "float" and float(param.get("min", 0.0)) <= 0.0
+        ]
+        supports = [{"indices": ingredient_idx}] if ingredient_idx else []
+
+    def _original_recipe(raw: np.ndarray) -> tuple[np.ndarray, bool, dict[str, Any]]:
+        recipe, ok = apply_cardinality(
+            raw,
+            search_bounds,
+            groups,
+            ratios,
+            max_nonzero=max_nonzero,
+            min_dose=min_dose,
+            supports=None if supports is groups else supports,
+        )
+        recipe = snap_numeric(recipe, params)
+        return recipe, ok, candidate_by_name(recipe, params)
+
     for i in range(cand.shape[0]):
         requested = cand[i : i + 1]
-        candidate_feasible = True
         reconstructed = None
         encoded = None
         encoded_actual = None
-        if use_pca_model and pca is not None:
+        if pca_in_x:
+            x_vec, candidate_feasible, cand_dict = _original_recipe(requested.detach().cpu().numpy().reshape(-1))
+            encoder = acq_model.models[0] if hasattr(acq_model, "models") else acq_model
+            z_actual = (
+                encoder.encode(torch.tensor(x_vec.reshape(1, -1), dtype=tdtype, device=tdevice))
+                .detach()
+                .cpu()
+                .numpy()
+                .reshape(-1)
+            )
+            encoded = z_actual.tolist()
+            encoded_actual = z_actual.tolist()
+            x_model = torch.tensor(z_actual.reshape(1, -1), dtype=tdtype, device=tdevice)
+            reconstructed = {
+                "combined": x_vec.tolist(),
+                "by_name": cand_dict,
+                "success": bool(candidate_feasible),
+                "feasible": bool(candidate_feasible),
+                "on_target": True,
+                "final_error": 0.0,
+                "latent_error_rel": 0.0,
+            }
+        elif use_pca_model and pca is not None:
             z_requested = requested.detach().cpu().numpy().reshape(-1)
-            x_vec, reconstructed, z_actual = _decode_latent(z_requested, pca, pc_mins, pc_range, params, req)
-            candidate_feasible = bool(reconstructed.get("feasible"))
+            x_vec, reconstructed, _z_actual = _decode_latent(z_requested, pca, pc_mins, pc_range, params, req)
+            x_vec, candidate_feasible, cand_dict = _original_recipe(x_vec)
+            from .preprocess import input_to_z_norm as _to_z
+
+            z_actual = _to_z(pca, pc_mins, pc_range, x_vec.reshape(1, -1)).reshape(-1)
             encoded = z_requested.tolist()
             encoded_actual = np.asarray(z_actual, dtype=float).reshape(-1).tolist()
             x_model = torch.tensor(np.asarray(z_actual, dtype=float).reshape(1, -1), dtype=tdtype, device=tdevice)
-            cand_dict = dict(reconstructed["by_name"])
+            if reconstructed is not None:
+                reconstructed = dict(reconstructed)
+                reconstructed["combined"] = x_vec.tolist()
+                reconstructed["by_name"] = cand_dict
+                reconstructed["feasible"] = bool(candidate_feasible)
+        elif use_ilr and encoder is not None:
+            z_requested = requested.detach().cpu().numpy().reshape(-1)
+            x_vec, candidate_feasible, cand_dict = _original_recipe(encoder.inverse(z_requested).reshape(-1))
+            z_actual = encoder.forward(x_vec).reshape(-1)
+            encoded = z_requested.tolist()
+            encoded_actual = z_actual.tolist()
+            x_model = torch.tensor(z_actual.reshape(1, -1), dtype=tdtype, device=tdevice)
         else:
-            x_vec = snap_numeric(requested.detach().cpu().numpy().reshape(-1), params)
-            x_vec, candidate_feasible = project_to_feasible(x_vec, search_bounds, groups, ratios)
-            x_vec = snap_numeric(x_vec, params)
+            x_vec, candidate_feasible, cand_dict = _original_recipe(requested.detach().cpu().numpy().reshape(-1))
             x_model = torch.tensor(x_vec.reshape(1, -1), dtype=tdtype, device=tdevice)
-            cand_dict = candidate_by_name(x_vec, params)
         means = []
         variances = []
         for k, m in enumerate(model.models):
+            if k >= n_obj:
+                break
             post = m.posterior(x_model)
             mu_t = float(post.mean.detach().cpu().numpy().ravel()[0])
             vr = float(post.variance.detach().cpu().numpy().ravel()[0])
@@ -353,13 +486,23 @@ def _run_optimization_locked(req: OptimizeRequest, device: str, cuda_device: int
                 info["scaler_scale"] = np.asarray(scaler_scale).tolist()
             encoding_info = info
 
+    from .acquisition import resolve_acquisition_name
+
     sator_version, botorch_version = _component_versions()
     diagnostics: dict[str, Any] = {
         "device": str(tdevice),
         "cuda_device_index": cuda_idx,
         "seed": int(rng_seed),
         "batch_size": num,
+        "mode": str(getattr(cfg, "mode", "lab")),
+        "acquisition": resolve_acquisition_name(req, n_obj, tX),
         "dropped_rows": dropped_rows,
+        "rows_collapsed": int(prepared["collapsed"]),
+        "fixed_noise": bool(prepared["fixed_noise"]),
+        "feasibility_model": prepared["feasibility"] is not None,
+        "mixed_model": bool(use_mixed),
+        "mixture_transform": "ilr" if use_ilr else "none",
+        "pca_search": "x" if pca_in_x else "none",
         "bounds_clipped": int(n_clipped),
         "objective_names": obj_names,
         "sator_version": sator_version,
