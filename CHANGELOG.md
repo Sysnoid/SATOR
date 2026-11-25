@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **Correctness:** one sign convention for `max` / `maximize` / `min` / `minimize`
+  and the threshold spellings. Threshold goals (`minimize_below`,
+  `maximize_above`, `maximize_below`, `minimize_above`) are BoTorch outcome
+  constraints, so a threshold weight can no longer flip the feasible side.
+  Unknown goals and acquisitions return 422.
+- **Requests:** `X`/`Y` shape, bounds, non-finite columns, `batch_size` ≤ 16,
+  and `pca_dimension` are validated. `num_restarts`, `raw_samples`, `ref_point`,
+  and `sequential` are read from `advanced` / `acquisition_params`. The
+  hypervolume reference point scales with each objective. Omitted seeds are
+  random and echoed in `diagnostics.seed`.
+- **Search space:** `int` values are rounded and `categorical` values snap to a
+  declared level. `dataset.pending_X` is passed through as pending experiments.
+- **PCA:** reconstruction uses the original column order and every sum group,
+  projects onto the feasible set, and reports `success` only when the recipe
+  is feasible and on the latent target. Degenerate components are dropped
+  (`k_effective`). `pca_dimension: "auto"` and `pca_margin` (default 0.2) widen
+  the latent box. Predictions are scored at the encoding of the returned recipe.
+- **Runtime:** optimize and reconstruct jobs run in a child process. A timeout
+  terminates that process, and the result queue is drained while the child
+  is alive so large results cannot deadlock the worker.
 - **Fix:** soft advanced-goal scoring (`target`, `within_range`, thresholds,
   `improve`) now converts GP posterior means from the engine's signed training
   frame back to original `Y` units before comparing to user `target_value` /

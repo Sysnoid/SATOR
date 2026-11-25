@@ -77,16 +77,20 @@ target location `x̂` in original-variable space (the **reconstruction target**)
 The reconstructor then solves:
 
 ```
-minimize      ½ ‖ x − x̂ ‖²
-subject to    ingredient_min[i] ≤ x[i] ≤ ingredient_max[i]    (i < n_ingredients)
-              parameter_min[j]  ≤ x[n_ing + j] ≤ parameter_max[j]
-              Σᵢ x[i] = sum_target                            (i < n_ingredients)
-              min_ratio ≤ x[i] / x[j] ≤ max_ratio             (per ratio rule)
+minimize      ½ ‖ (x − x̂) / s ‖²  +  ρ ‖ enc(x) − z ‖²
+subject to    bounds on every column, in the original column order
+              one equality per sum group
+              min_ratio ≤ x[i] / x[j] ≤ max_ratio
 ```
 
-`x̂` is not guaranteed to be feasible (PCA cannot know about sum or ratio
-constraints by itself), so SLSQP drives the solution back onto the feasible
-set while staying as close to `x̂` as possible.
+`x̂` is the PCA inverse and `s` is the feature scale. Sum groups are index
+lists, so a process parameter may sit before the ingredients. A `z` outside
+the feasible image cannot be hit exactly.
+
+`success` is true only when the recipe is feasible **and** on target
+(`final_error ≤ target_precision * (1 + ‖z‖)`). The response also reports
+`feasible`, `on_target`, and `latent_error_rel`. `POST /v1/reconstruct?sync=true`
+runs this in the request instead of a job.
 
 ---
 
@@ -111,7 +115,7 @@ set while staying as close to `x̂` as possible.
 
 | Field | Meaning |
 |---|---|
-| `success` | SLSQP terminated within tolerance. |
+| `success` | Feasible and within the latent tolerance. |
 | `ingredients` | Sum-to-target feasible fractions. |
 | `parameters` | Remaining variables inside their bounds. |
 | `combined` | `[*ingredients, *parameters]`. |

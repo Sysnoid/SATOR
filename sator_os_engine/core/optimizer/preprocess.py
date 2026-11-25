@@ -90,7 +90,30 @@ class ScaledPCA:
         self.explained_variance_ratio_ = self._pca.explained_variance_ratio_
         self.scaler_mean_ = mu
         self.scaler_scale_ = sigma
+        self.k_requested_: int | str | None = None
+        self.k_effective_: int | None = None
+        self.k_dropped_: int = 0
         return self
+
+    def retain_components(self, keep: np.ndarray) -> None:
+        """Drop principal components whose ``keep`` entry is false."""
+        if self._pca is None or self.components_ is None:
+            raise RuntimeError("call fit() first")
+        mask = np.asarray(keep, dtype=bool)
+        if mask.shape[0] != self.components_.shape[0]:
+            raise ValueError("keep mask does not match the number of components")
+        if not np.any(mask):
+            raise ValueError("PCA components are degenerate (no component passed the variance floor)")
+        self._pca.components_ = self._pca.components_[mask]
+        self._pca.explained_variance_ = self._pca.explained_variance_[mask]
+        self._pca.explained_variance_ratio_ = self._pca.explained_variance_ratio_[mask]
+        if getattr(self._pca, "singular_values_", None) is not None:
+            self._pca.singular_values_ = self._pca.singular_values_[mask]
+        self._pca.n_components_ = int(np.sum(mask))
+        self.n_components = int(np.sum(mask))
+        self.components_ = self.components_[mask]
+        self.explained_variance_ = np.asarray(self._pca.explained_variance_)
+        self.explained_variance_ratio_ = np.asarray(self._pca.explained_variance_ratio_)
 
     def transform(self, X: np.ndarray) -> np.ndarray:
         assert self._pca is not None, "call fit() first"
@@ -106,21 +129,62 @@ class ScaledPCA:
         return self._unscale(X_scaled)
 
 
-def fit_pca_normalize(X: np.ndarray, k: int):
-    """Fit ``ScaledPCA`` and return (pca, pc_mins, pc_maxs, pc_range, Z_norm)."""
-    k = int(k)
-    d_in = X.shape[1]
-    # Allow using up to the full input dimension. Previously capped at d_in - 1,
-    # which caused a mismatch (e.g., 2D input with requested 2 components fell back to 1),
-    # breaking downstream PCA map generation and GP posterior shapes.
-    k = max(1, min(k, d_in))
-    pca = ScaledPCA(n_components=k)
-    Z_raw = pca.fit_transform(X)
-    pc_mins = np.min(Z_raw, axis=0)
-    pc_maxs = np.max(Z_raw, axis=0)
+def _pca_component_limit(n_rows: int, n_features: int) -> int:
+    limit = min(n_rows - 1, n_features)
+    if limit < 1:
+        raise ValueError(f"pca_dimension requires at least 2 rows and 1 column; got n={n_rows}, d={n_features}")
+    return limit
+
+
+def resolve_pca_k(n_rows: int, n_features: int, k: int | str) -> tuple[int, bool]:
+    """Return ``(k_fit, auto)`` or raise when ``k`` is outside ``1..min(n-1, d)``."""
+    limit = _pca_component_limit(n_rows, n_features)
+    if isinstance(k, str) and str(k).strip().lower() == "auto":
+        return min(limit, 10), True
+    try:
+        ki = int(k)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"pca_dimension must be an integer or 'auto' in 1..{limit}; got {k!r}") from exc
+    if ki < 1 or ki > limit:
+        raise ValueError(f"pca_dimension must satisfy 1 <= k <= min(n-1, d)={limit}; got {ki}")
+    return ki, False
+
+
+def fit_pca_normalize(X: np.ndarray, k: int | str):
+    """Fit ``ScaledPCA`` and return ``(pca, pc_mins, pc_maxs, pc_range, Z_norm)``.
+
+    ``k`` must satisfy ``1 <= k <= min(n-1, d)``. ``k="auto"`` keeps the smallest
+    prefix with at least 95% explained variance, capped at ``min(n-1, d, 10)``.
+    Components with explained-variance ratio below ``1e-10`` or a score range
+    below ``1e-9`` are dropped; ``pca.k_effective_`` reports how many remain.
+    """
+    x = np.asarray(X, dtype=float)
+    n_rows, n_features = x.shape
+    k_fit, auto = resolve_pca_k(n_rows, n_features, k)
+    pca = ScaledPCA(n_components=k_fit)
+    z_raw = pca.fit_transform(x)
+    ratio = np.asarray(pca.explained_variance_ratio_, dtype=float)
+    keep = np.ones(k_fit, dtype=bool)
+    if auto:
+        cumulative = np.cumsum(np.nan_to_num(ratio, nan=0.0))
+        k_auto = int(np.searchsorted(cumulative, 0.95) + 1)
+        k_auto = max(1, min(k_auto, k_fit))
+        keep[:] = False
+        keep[:k_auto] = True
+    pc_range_raw = np.max(z_raw, axis=0) - np.min(z_raw, axis=0)
+    keep = keep & np.isfinite(ratio) & (ratio >= 1e-10) & (pc_range_raw >= 1e-9)
+    n_before = int(k_fit)
+    if not np.all(keep):
+        pca.retain_components(keep)
+        z_raw = pca.transform(x)
+    pc_mins = np.min(z_raw, axis=0)
+    pc_maxs = np.max(z_raw, axis=0)
     pc_range = np.maximum(pc_maxs - pc_mins, 1e-12)
-    Z_norm = (Z_raw - pc_mins) / pc_range
-    return pca, pc_mins, pc_maxs, pc_range, Z_norm
+    z_norm = (z_raw - pc_mins) / pc_range
+    pca.k_requested_ = "auto" if auto else int(k)
+    pca.k_effective_ = int(z_norm.shape[1])
+    pca.k_dropped_ = int(n_before - pca.k_effective_)
+    return pca, pc_mins, pc_maxs, pc_range, z_norm
 
 
 def z_norm_to_input(pca, pc_mins: np.ndarray, pc_range: np.ndarray, z_norm: np.ndarray) -> np.ndarray:

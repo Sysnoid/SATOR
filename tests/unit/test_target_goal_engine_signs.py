@@ -84,10 +84,7 @@ def test_run_optimization_multi_target_lab_like():
     result = run_optimization(req, device="cpu")
     preds = result.get("predictions") or []
     assert preds
-    dE = [
-        float(np.linalg.norm(np.asarray(p["objectives"], float) - targets))
-        for p in preds
-    ]
+    dE = [float(np.linalg.norm(np.asarray(p["objectives"], float) - targets)) for p in preds]
     # Training ΔE to target for comparison
     train_dE = np.linalg.norm(Y - targets, axis=1)
     assert min(dE) <= float(np.median(train_dE)) + 0.15, f"pred dE={dE}, train median={np.median(train_dE)}"

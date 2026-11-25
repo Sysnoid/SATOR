@@ -106,9 +106,9 @@ linear inequalities (in input space) and by post-selection projection
 
 | Field | Meaning |
 |---|---|
-| `ref_point` | Explicit hypervolume reference point. For minimization, choose slightly worse than the worst observed `Y` per objective. |
-| `ref_point_strategy` | `observed_min_margin` (default) derives the point from data with a safety margin. |
-| `pending_as_fantasies` | When `true` (default for async use), model pending candidates as fantasy observations to reduce duplicate suggestions. |
+| `ref_point` | Explicit hypervolume reference point in original `Y` units, read from `acquisition_params` or `advanced`. The default is `min(Y) - 0.1 * (max(Y) - min(Y))` in the signed training frame, so rescaling an objective does not move the reference. |
+| `num_restarts`, `raw_samples`, `acq_maxiter`, `sequential` | Read from `acquisition_params` or `advanced`. EHVI with `q > 1` or more than two objectives is sequential even when `sequential` is omitted. |
+| `pending_X` | Pass in-flight recipes on `dataset.pending_X` (or `dataset.X_pending`). They are passed to the acquisition as `X_pending` and treated as already observed when dropping duplicates. |
 
 ---
 

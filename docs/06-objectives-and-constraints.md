@@ -13,14 +13,19 @@ understands, and explains how each one shapes the optimization.
 
 ## 6.1 Goal types
 
-Every entry in `objectives` must declare a `goal`. The optimizer interprets
-the goal when scoring candidates, either via a BoTorch acquisition function
-(for `min` / `max`) or via Sobol-grid scoring (for all other goals).
+Every entry in `objectives` must declare a `goal`. `min` / `minimize`,
+`max` / `maximize`, and the threshold goals use a BoTorch acquisition.
+`target`, `within_range`, `explore`, and `improve` use Sobol-grid scoring.
+`maximize` is the same direction as `max`; `minimize` is the same direction
+as `min`. An unknown spelling is rejected.
 
-SATOR splits goal types into two families:
+SATOR splits goal types into three families:
 
 - **Soft goals** shape the acquisition score. The optimizer *prefers*
   candidates that satisfy your intent but does **not** guarantee it.
+- **Threshold goals** (`minimize_below`, `maximize_above`, `maximize_below`,
+  `minimize_above`) are outcome constraints on that acquisition. `weight`
+  does not choose the side of the threshold.
 - **Hard goals** (the `enforce_*` family) are evaluated against the GP
   posterior and used as a feasibility mask during candidate selection.
   Every returned prediction carries an `enforced_goals_satisfied` flag so
@@ -29,13 +34,13 @@ SATOR splits goal types into two families:
 
 | Goal | Family | Meaning | Extra fields |
 |---|---|---|---|
-| [`min`](#611-min)                             | soft | Minimize `f(x)`. | — |
-| [`max`](#612-max)                             | soft | Maximize `f(x)`. | — |
+| [`min`](#611-min) / `minimize`                | soft | Minimize `f(x)`. | — |
+| [`max`](#612-max) / `maximize`                | soft | Maximize `f(x)`. | — |
 | [`target`](#613-target)                       | soft | Drive `f(x)` toward a specific value `T`. | `target_value`, optional `target_tolerance` |
-| [`minimize_below`](#614-minimize_below)       | soft | Prefer `f(x) ≤ T`, softly penalize above. | `threshold` |
-| [`maximize_above`](#615-maximize_above)       | soft | Prefer `f(x) ≥ T`, softly penalize below. | `threshold` |
-| [`maximize_below`](#616-maximize_below)       | soft | Maximize `f(x)` but stay below `T`. | `threshold` |
-| [`minimize_above`](#617-minimize_above)       | soft | Minimize `f(x)` but stay above `T`. | `threshold` |
+| [`minimize_below`](#614-minimize_below)       | constraint | Minimize `f(x)` subject to `f(x) ≤ T`. | `threshold.value` |
+| [`maximize_above`](#615-maximize_above)       | constraint | Maximize `f(x)` subject to `f(x) ≥ T`. | `threshold.value` |
+| [`maximize_below`](#616-maximize_below)       | constraint | Maximize `f(x)` subject to `f(x) ≤ T`. | `threshold.value` |
+| [`minimize_above`](#617-minimize_above)       | constraint | Minimize `f(x)` subject to `f(x) ≥ T`. | `threshold.value` |
 | [`within_range`](#618-within_range)           | soft | Keep `f(x) ∈ [A, B]`, preferably near `ideal`. | `range` |
 | [`explore`](#619-explore) *(alias `probe`)*   | soft | Prefer high-variance regions. | — |
 | [`improve`](#6110-improve)                    | soft | Prefer the largest expected improvement over the current best. | — |
@@ -95,11 +100,11 @@ sum is an L1-style trade-off, not CIE ΔE. For color matching prefer a single
 
 ### 6.1.4 `minimize_below`
 
-**Soft.** Prefer `f(x) ≤ T`; anything above is *softly penalized* in the
-acquisition score. The optimizer may still return candidates whose GP mean
-sits above `T` when nothing better is available. Use
-[`enforce_below`](#6111-enforce) if the threshold is a requirement rather
-than a preference.
+Minimize `f(x)` subject to `f(x) ≤ T`. The threshold is a BoTorch outcome
+constraint on qLogEI (or qLogEHVI when several objectives are active), so the
+`weight` field cannot flip which side of `T` is preferred. Use
+[`enforce_below`](#6111-enforce) when the response must also flag posterior
+violations. Without a `threshold`, the goal behaves like `min`.
 
 ```json
 "impurity_ppm": {
@@ -110,10 +115,9 @@ than a preference.
 
 ### 6.1.5 `maximize_above`
 
-**Soft.** Prefer `f(x) ≥ T`; anything below is *softly penalized*. Same
-caveat as `minimize_below`: this is a preference, not a guarantee. Use
-[`enforce_above`](#6111-enforce) if the threshold must hold on every
-returned candidate.
+Maximize `f(x)` subject to `f(x) ≥ T`, as an outcome constraint. `weight` does
+not change the feasible side. Without a `threshold`, the goal behaves like `max`.
+Use [`enforce_above`](#6111-enforce) to flag posterior violations on the response.
 
 ```json
 "tensile_strength": {
@@ -124,7 +128,8 @@ returned candidate.
 
 ### 6.1.6 `maximize_below`
 
-Maximize `f(x)` but never cross above `T`.
+Maximize `f(x)` subject to `f(x) ≤ T`. The optimum sits on the threshold from
+below; changing `weight` does not move it to the other side.
 
 ```json
 "speed": {
@@ -135,7 +140,8 @@ Maximize `f(x)` but never cross above `T`.
 
 ### 6.1.7 `minimize_above`
 
-Minimize `f(x)` but never drop below `T`.
+Minimize `f(x)` subject to `f(x) ≥ T`. The optimum sits on the threshold from
+above.
 
 ```json
 "temperature": {

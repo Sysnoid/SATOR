@@ -3,8 +3,8 @@
 This module validates:
 - enforce_sum_to_target_training: rows are scaled on specified indices to match
   a given target sum.
-- fit_pca_normalize: clamps k to [1, d_in], returns normalized Z in [0,1],
-  and strictly positive pc_range.
+- fit_pca_normalize: accepts k in 1..min(n-1, d), returns normalized Z in [0,1],
+  and strictly positive pc_range. k above that limit raises.
 - input_to_z_norm / z_norm_to_input: round-trip conversion recovers inputs with
   small error when k equals the input dimension.
 """
@@ -12,6 +12,7 @@ This module validates:
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from sator_os_engine.core.optimizer.preprocess import (
     enforce_sum_to_target_training,
@@ -35,15 +36,17 @@ def test_fit_pca_normalize_k_bounds_and_ranges():
     rng = np.random.default_rng(1)
     X = rng.normal(size=(40, 3))  # d_in=3
 
-    for k in (1, 2, 3, 5):  # 5 will be clamped to 3
+    for k in (1, 2, 3):
         pca, pc_mins, pc_maxs, pc_range, Z_norm = fit_pca_normalize(X, k)
-        k_eff = min(max(1, k), X.shape[1])
-        assert Z_norm.shape == (X.shape[0], k_eff)
-        assert pca.components_.shape[0] == k_eff
+        assert Z_norm.shape == (X.shape[0], k)
+        assert pca.components_.shape[0] == k
         # pc_range strictly positive
         assert np.all(pc_range > 0.0)
         # Z_norm mostly within [0,1] allowing small numeric tolerance
         assert np.all(Z_norm >= -1e-9) and np.all(Z_norm <= 1.0 + 1e-9)
+
+    with pytest.raises(ValueError, match="pca_dimension"):
+        fit_pca_normalize(X, k=5)
 
 
 def test_roundtrip_input_to_z_norm_and_back():

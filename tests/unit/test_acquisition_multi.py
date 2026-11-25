@@ -54,7 +54,9 @@ def test_qehvi_input_space_constraints_passed(monkeypatch: pytest.MonkeyPatch):
     )
     captured = {}
 
-    def fake_optimize_acqf(acqf, bounds, q, num_restarts, raw_samples, inequality_constraints=None, options=None):
+    def fake_optimize_acqf(
+        acqf, bounds, q, num_restarts, raw_samples, inequality_constraints=None, options=None, **kwargs
+    ):
         captured["inequality_constraints"] = inequality_constraints
         # Return a fixed candidate with correct shape (q, d)
         d_model = bounds.shape[1]
@@ -109,7 +111,9 @@ def test_qehvi_pca_constraints_suppressed(monkeypatch: pytest.MonkeyPatch):
     )
     captured = {}
 
-    def fake_optimize_acqf(acqf, bounds, q, num_restarts, raw_samples, inequality_constraints=None, options=None):
+    def fake_optimize_acqf(
+        acqf, bounds, q, num_restarts, raw_samples, inequality_constraints=None, options=None, **kwargs
+    ):
         captured["inequality_constraints"] = inequality_constraints
         d_model = bounds.shape[1]
         return torch.full((q, d_model), 0.5, dtype=tdtype), None

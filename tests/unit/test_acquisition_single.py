@@ -20,6 +20,7 @@ import torch
 
 from sator_os_engine.core.optimizer.acquisition import select_candidates_single_objective
 from sator_os_engine.core.optimizer.gp import bounds_input, build_models
+from sator_os_engine.core.optimizer.utils import training_sign
 
 
 def _make_params():
@@ -30,8 +31,8 @@ def _make_params():
 
 
 def _outcome_sign(goal: str) -> float:
-    """Match ``mobo_engine``: GP training uses ``Y * sign`` (+1 max, -1 else)."""
-    return 1.0 if str(goal).lower() == "max" else -1.0
+    """Match ``mobo_engine``: GP training uses ``Y * training_sign(goal)``."""
+    return training_sign(goal)
 
 
 def _build_gp_for_func(func, n=60, seed=0, *, goal: str = "min"):

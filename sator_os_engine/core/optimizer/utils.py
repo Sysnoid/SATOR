@@ -1,8 +1,145 @@
 from __future__ import annotations
 
+import secrets
+import threading
 from typing import Any
 
 import numpy as np
+
+# One lock for in-process optimization. BoTorch's acquisition optimizer draws
+# from the global torch RNG; the lock plus ``fork_rng`` keeps concurrent jobs
+# from crossing seeds. Re-entrant because the engine holds it across the call
+# into acquisition.
+optimization_lock = threading.RLock()
+
+MAX_GOALS = frozenset({"max", "maximize", "maximize_above", "maximize_below"})
+MIN_GOALS = frozenset({"min", "minimize", "minimize_below", "minimize_above"})
+THRESHOLD_GOALS = frozenset({"minimize_below", "maximize_above", "maximize_below", "minimize_above"})
+ENFORCE_GOALS = frozenset({"enforce_above", "enforce_below", "enforce_within_range"})
+SOFT_GOALS = frozenset({"within_range", "target", "explore", "probe", "improve"})
+PLAIN_DIRECTIONAL_GOALS = frozenset({"min", "minimize", "max", "maximize"})
+KNOWN_GOALS = MAX_GOALS | MIN_GOALS | ENFORCE_GOALS | SOFT_GOALS
+
+# Names after ``normalize_acquisition_name`` (lowercase, no '-' or '_').
+KNOWN_ACQUISITIONS = frozenset(
+    {
+        "qnehvi",
+        "qlogehvi",
+        "qlehvi",
+        "logehvi",
+        "qehvi",
+        "ehvi",
+        "qnoisyehvi",
+        "qlognoisyehvi",
+        "qlognei",
+        "qnei",
+        "qlogei",
+        "logei",
+        "parego",
+        "qparego",
+        "qei",
+        "qpi",
+        "pi",
+        "qucb",
+        "ucb",
+        "sobol",
+    }
+)
+
+
+def normalize_goal(goal: str) -> str:
+    return str(goal).strip().lower()
+
+
+def normalize_acquisition_name(name: str | None) -> str:
+    if name is None or str(name).strip() == "":
+        return "qnehvi"
+    return str(name).strip().lower().replace("-", "").replace("_", "")
+
+
+def goal_sign(goal: str) -> float:
+    """+1 to maximise a directional goal, -1 to minimise it.
+
+    Unknown names, including soft and ``enforce_*`` goals, raise. Training
+    those goals uses :func:`training_sign`.
+    """
+    g = normalize_goal(goal)
+    if g in MAX_GOALS:
+        return 1.0
+    if g in MIN_GOALS:
+        return -1.0
+    raise ValueError(f"unknown goal {goal!r}")
+
+
+def training_sign(goal: str) -> float:
+    """Sign applied to ``Y`` before the GP is fit.
+
+    Directional goals use :func:`goal_sign`, so ``maximize`` and the threshold
+    spellings train in the same direction as ``max`` / ``min``. Soft and
+    hard-constraint goals keep the historical convention of training on ``-Y``;
+    their scores are computed in the user's units after unsigning.
+    """
+    g = normalize_goal(goal)
+    if g in MAX_GOALS or g in MIN_GOALS:
+        return goal_sign(g)
+    if g in ENFORCE_GOALS or g in SOFT_GOALS:
+        return -1.0
+    raise ValueError(f"unknown goal {goal!r}")
+
+
+def threshold_spec(cfg: dict[str, Any] | None) -> tuple[str, float] | None:
+    """Return ``(side, T)`` for a threshold goal, or ``None`` when unset.
+
+    ``side`` is ``"below"`` (``f <= T``) or ``"above"`` (``f >= T``).
+    """
+    if not isinstance(cfg, dict):
+        return None
+    goal = normalize_goal(cfg.get("goal", ""))
+    if goal not in THRESHOLD_GOALS:
+        return None
+    raw = cfg.get("threshold_value")
+    if raw is None:
+        thr = cfg.get("threshold")
+        if isinstance(thr, dict):
+            raw = thr.get("value")
+        elif isinstance(thr, (int, float)):
+            raw = thr
+    if raw is None:
+        return None
+    side = "below" if goal.endswith("below") else "above"
+    return side, float(raw)
+
+
+def resolve_seed(seed: int | None) -> int:
+    """Map a missing seed to a fresh 31-bit seed. An explicit seed is kept."""
+    if seed is None:
+        return secrets.randbits(31)
+    return int(seed)
+
+
+def sum_groups_from_config(req: Any, dim: int) -> list[dict[str, Any]]:
+    cfg = getattr(req, "optimization_config", None)
+    sums = (getattr(cfg, "sum_constraints", None) or []) if cfg is not None else []
+    groups: list[dict[str, Any]] = []
+    for sc in sums:
+        if not isinstance(sc, dict):
+            continue
+        idxs = [int(i) for i in sc.get("indices", []) if 0 <= int(i) < dim]
+        if not idxs:
+            continue
+        target = sc.get("target", sc.get("target_sum", 1.0))
+        groups.append({"indices": idxs, "target": float(target if target is not None else 1.0)})
+    return groups
+
+
+def ratio_constraints_from_config(req: Any) -> list[dict[str, Any]]:
+    cfg = getattr(req, "optimization_config", None)
+    raw = (getattr(cfg, "ratio_constraints", None) or []) if cfg is not None else []
+    out: list[dict[str, Any]] = []
+    for rc in raw:
+        if isinstance(rc, dict):
+            out.append(dict(rc))
+    return out
 
 
 def sample_candidates(search_space: dict[str, Any], n: int, seed: int | None = None) -> list[dict[str, float]]:

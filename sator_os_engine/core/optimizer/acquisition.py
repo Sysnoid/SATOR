@@ -26,6 +26,18 @@ from botorch.utils.multi_objective.scalarization import get_chebyshev_scalarizat
 from botorch.utils.sampling import sample_simplex
 from torch.quasirandom import SobolEngine
 
+from .utils import (
+    KNOWN_ACQUISITIONS,
+    MAX_GOALS,
+    MIN_GOALS,
+    THRESHOLD_GOALS,
+    normalize_acquisition_name,
+    normalize_goal,
+    optimization_lock,
+    resolve_seed,
+    threshold_spec,
+    training_sign,
+)
 from .utils import build_linear_constraints as _build_linear_constraints
 from .utils import enforce_ratio_constraints_np as _enforce_ratio_constraints_np
 from .utils import enforce_sum_constraints_np as _enforce_sum_constraints_np
@@ -44,11 +56,13 @@ _log = logging.getLogger("sator")
 # acquisition score. They do NOT filter candidates and they do NOT guarantee
 # that returned predictions satisfy the threshold on the GP posterior.
 #
-#   - "minimize_below" / "maximize_above"    (legacy threshold penalties)
 #   - "within_range"                         (soft range penalty + ideal pull)
 #   - "target"                               (distance-to-target penalty)
 #
-# Use them when a threshold is a **preference**, not a requirement.
+# Threshold goals ("minimize_below", "maximize_above", "maximize_below",
+# "minimize_above") are outcome constraints on qLogEI / qLogEHVI. They are
+# not the Sobol penalty path. Use them when the feasible side of T matters
+# and a weight must not flip that side.
 #
 # For hard thresholds that MUST hold on the GP posterior, use the
 # "enforce_*" goal family (parsed by utils.extract_enforced_goal_specs and
@@ -78,25 +92,24 @@ def _input_space_to_z_norm(
     return (z_raw - pc_mins) / pc_range
 
 
+_EHVI_NAMES = frozenset({"qehvi", "ehvi", "qnehvi", "qlogehvi", "qlehvi", "logehvi", "qnoisyehvi", "qlognoisyehvi"})
+_BOTORCH_NAMES = KNOWN_ACQUISITIONS - {"sobol"}
+
+
 def _normalize_acquisition_name(req: Any) -> str:
     cfg = getattr(req, "optimization_config", None)
     if cfg is None:
         return "qnehvi"
-    a = getattr(cfg, "acquisition", None) or getattr(cfg, "algorithm", None) or "qnehvi"
-    s = str(a).strip().lower().replace("-", "").replace("_", "")
-    return s
+    raw = getattr(cfg, "acquisition", None) or getattr(cfg, "algorithm", None) or "qnehvi"
+    name = normalize_acquisition_name(raw)
+    if name not in KNOWN_ACQUISITIONS:
+        raise ValueError(f"unknown acquisition {raw!r}")
+    return name
 
 
 def _objective_sign(goal: str) -> float:
-    """Match ``mobo_engine``: ``+1`` for ``max``, ``-1`` for every other goal.
-
-    The engine fits each GP on ``Y * sign`` so BoTorch always sees a
-    minimization-style frame. Soft scoring (``target``, ``within_range``,
-    thresholds, …) and user-facing thresholds are stated in **original** ``Y``
-    units, so callers must convert posterior means with
-    ``_posterior_mean_to_user_units`` before comparing.
-    """
-    return 1.0 if str(goal).lower() == "max" else -1.0
+    """Sign the engine used when it trained on ``Y * sign``. See ``training_sign``."""
+    return training_sign(goal)
 
 
 def _posterior_mean_to_user_units(mu: np.ndarray, goal: str) -> np.ndarray:
@@ -138,10 +151,7 @@ def _target_soft_score(
 
     weight = float(cfg_o.get("weight", 1.0) or 1.0)
     err = np.abs(mu - float(target_val))
-    if tol > 0:
-        base = -(err / tol) + var_w * np.sqrt(var)
-    else:
-        base = -err + var_w * np.sqrt(var)
+    base = -(err / tol) + var_w * np.sqrt(var) if tol > 0 else -err + var_w * np.sqrt(var)
     return weight * base
 
 
@@ -151,6 +161,188 @@ def _acquisition_params(req: Any) -> dict[str, Any]:
         return {}
     ap = getattr(cfg, "acquisition_params", None)
     return dict(ap) if isinstance(ap, dict) else {}
+
+
+def _advanced(req: Any) -> dict[str, Any]:
+    cfg = getattr(req, "optimization_config", None)
+    if cfg is None:
+        return {}
+    adv = getattr(cfg, "advanced", None)
+    return dict(adv) if isinstance(adv, dict) else {}
+
+
+def _objective_cfgs(req: Any, goals: list[str] | None = None) -> list[dict[str, Any]]:
+    raw = list(req.objectives.values()) if isinstance(getattr(req, "objectives", None), dict) else []
+    cfgs = [c if isinstance(c, dict) else {} for c in raw]
+    if goals is not None and len(cfgs) < len(goals):
+        cfgs = cfgs + [{"goal": g} for g in goals[len(cfgs) :]]
+    return cfgs
+
+
+def _has_threshold(goal: str, cfg: dict[str, Any]) -> bool:
+    return threshold_spec({**cfg, "goal": normalize_goal(goal)}) is not None
+
+
+def _is_directional(goal: str, cfg: dict[str, Any]) -> bool:
+    g = normalize_goal(goal)
+    if g in ("min", "minimize", "max", "maximize"):
+        return True
+    return g in THRESHOLD_GOALS and not _has_threshold(g, cfg)
+
+
+def _optimizer_controls(req: Any, *, q: int, n_obj: int, name: str) -> dict[str, Any]:
+    ap = _acquisition_params(req)
+    adv = _advanced(req)
+    num_restarts = int(ap.get("num_restarts", adv.get("num_restarts", 8)))
+    raw_samples = int(ap.get("raw_samples", adv.get("raw_samples", 256)))
+    maxiter = int(ap.get("acq_maxiter", adv.get("acq_maxiter", adv.get("maxiter", 200))))
+    batch_limit = int(ap.get("batch_limit", adv.get("batch_limit", 5)))
+    sequential = bool(ap.get("sequential", adv.get("sequential", False)))
+    if name in _EHVI_NAMES and (q > 1 or n_obj > 2):
+        sequential = True
+    return {
+        "num_restarts": max(1, num_restarts),
+        "raw_samples": max(1, raw_samples),
+        "options": {"batch_limit": max(1, batch_limit), "maxiter": max(1, maxiter)},
+        "sequential": sequential,
+    }
+
+
+def _reference_point(tY: torch.Tensor, req: Any, signs: np.ndarray) -> torch.Tensor:
+    """Hypervolume reference in the signed training frame.
+
+    Default is ``min(Y) - 0.1 * (max(Y) - min(Y))`` per objective, which stays
+    in the same place when an objective is rescaled. A user ``ref_point`` is
+    read in original Y units and multiplied by the training signs.
+    """
+    ap = _acquisition_params(req)
+    user = ap.get("ref_point", _advanced(req).get("ref_point"))
+    if user is not None:
+        rp = torch.tensor(list(user), dtype=tY.dtype, device=tY.device)
+        sgn = torch.as_tensor(signs, dtype=tY.dtype, device=tY.device)
+        return rp * sgn
+    y_min = tY.min(dim=0).values
+    y_max = tY.max(dim=0).values
+    span = (y_max - y_min).clamp_min(1e-6)
+    return y_min - 0.1 * span
+
+
+def _threshold_constraints(cfgs: list[dict[str, Any]]) -> list[Any] | None:
+    """Outcome constraints in user units. Positive means violated."""
+    cons: list[Any] = []
+    for index, cfg in enumerate(cfgs):
+        goal = normalize_goal(cfg.get("goal", "min"))
+        spec = threshold_spec({**cfg, "goal": goal})
+        if spec is None:
+            continue
+        side, level = spec
+        sign = training_sign(goal)
+
+        def _constraint(
+            z: torch.Tensor, *, index: int = index, side: str = side, level: float = level, sign: float = sign
+        ) -> torch.Tensor:
+            f = z[..., index] * sign
+            if side == "below":
+                return f - level
+            return level - f
+
+        cons.append(_constraint)
+    return cons or None
+
+
+def _best_signed(y_user: np.ndarray, goal: str, cfg: dict[str, Any]) -> float:
+    y = np.asarray(y_user, dtype=float).reshape(-1)
+    y = y[np.isfinite(y)]
+    if y.size == 0:
+        raise ValueError("objective has no finite observations")
+    sign = training_sign(goal)
+    signed = y * sign
+    spec = threshold_spec({**cfg, "goal": normalize_goal(goal)})
+    if spec is not None:
+        side, level = spec
+        feasible = y <= level if side == "below" else y >= level
+        if np.any(feasible):
+            return float(np.max(signed[feasible]))
+    return float(np.max(signed))
+
+
+def _bound_arrays(bounds: Any) -> tuple[np.ndarray, np.ndarray]:
+    arr = bounds.detach().cpu().numpy() if hasattr(bounds, "detach") else np.asarray(bounds, dtype=float)
+    return np.asarray(arr[0], dtype=float), np.asarray(arr[1], dtype=float)
+
+
+def _project_rows(rows: np.ndarray, params: list[dict[str, Any]], req: Any) -> np.ndarray:
+    x = _enforce_sum_constraints_np(rows, params, req)
+    x = _enforce_ratio_constraints_np(x, params, req)
+    return _enforce_sum_constraints_np(x, params, req)
+
+
+def _dedup_rows(
+    rows: np.ndarray,
+    observed: np.ndarray | None,
+    bounds: Any,
+    n: int,
+    seed: int,
+) -> np.ndarray:
+    """Drop points within 1e-6 (normalised) of data or each other, then refill."""
+    lo, hi = _bound_arrays(bounds)
+    span = np.maximum(hi - lo, 1e-12)
+    kept: list[np.ndarray] = []
+    pool: list[np.ndarray] = []
+
+    def _norm(row: np.ndarray) -> np.ndarray:
+        return (np.asarray(row, dtype=float) - lo) / span
+
+    if observed is not None and np.size(observed):
+        for row in np.atleast_2d(np.asarray(observed, dtype=float)):
+            if row.shape[0] == lo.shape[0]:
+                pool.append(_norm(row))
+
+    def _novel(row: np.ndarray) -> bool:
+        z = _norm(row)
+        return all(float(np.linalg.norm(z - prev)) >= 1e-6 for prev in pool)
+
+    for row in np.atleast_2d(np.asarray(rows, dtype=float)):
+        if row.shape[0] != lo.shape[0] or not _novel(row):
+            continue
+        kept.append(np.asarray(row, dtype=float))
+        pool.append(_norm(row))
+        if len(kept) >= n:
+            return np.stack(kept[:n], axis=0)
+    sob = SobolEngine(dimension=int(lo.shape[0]), scramble=True, seed=int(seed) % (2**31 - 1) or 1)
+    draw = sob.draw(max(64, n * 16)).cpu().numpy()
+    for unit in draw:
+        row = lo + (hi - lo) * np.asarray(unit, dtype=float)
+        if not _novel(row):
+            continue
+        kept.append(row)
+        pool.append(_norm(row))
+        if len(kept) >= n:
+            break
+    while len(kept) < n:
+        step = (len(kept) + 1) * 1e-3
+        base = kept[0] if kept else (lo + hi) / 2.0
+        row = np.clip(base + step, lo, hi)
+        kept.append(row)
+        pool.append(_norm(row))
+    return np.stack(kept[:n], axis=0)
+
+
+def _standardize_score(score: np.ndarray, y_col: np.ndarray, var: np.ndarray, *, explore: bool) -> np.ndarray:
+    """Divide by the training standard deviation and add a UCB bonus."""
+    scale = float(np.std(np.asarray(y_col, dtype=float)))
+    if not np.isfinite(scale) or scale < 1e-12:
+        scale = 1.0
+    out = np.asarray(score, dtype=float) / scale
+    if explore:
+        out = out + 0.1 * np.sqrt(np.maximum(var, 0.0)) / scale
+    return out
+
+
+def _as_pending(x_pending: torch.Tensor | None, tdtype, tdevice) -> torch.Tensor | None:
+    if x_pending is None:
+        return None
+    return x_pending.to(dtype=tdtype, device=tdevice)
 
 
 def _sobol_qmc_sampler(
@@ -263,6 +455,8 @@ def select_candidates_single_objective(
     tdevice,
     req,
     Y_np: np.ndarray,
+    train_X: torch.Tensor | None = None,
+    X_pending: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Coerce bounds to tensors if lists were passed
     if not hasattr(bounds_input, "shape"):
@@ -270,75 +464,67 @@ def select_candidates_single_objective(
     if not hasattr(bounds_model, "shape"):
         bounds_model = torch.tensor(bounds_model, dtype=tdtype, device=tdevice)
 
+    seed = resolve_seed(rng_seed)
     name = _normalize_acquisition_name(req)
     ap = _acquisition_params(req)
-    obj_cfgs = list(req.objectives.values()) if isinstance(req.objectives, dict) else []
-    cfg0 = obj_cfgs[0] if obj_cfgs else {}
-    goal = str(cfg0.get("goal", "min")).lower()
-    min_like = ("min", "minimize", "minimize_below", "minimize_above")
-    max_like = ("max", "maximize", "maximize_below", "maximize_above")
-    simple_goal = goal in min_like or goal in max_like
+    obj_cfgs = _objective_cfgs(req)
+    cfg0 = obj_cfgs[0] if obj_cfgs else {"goal": "min"}
+    goal = normalize_goal(cfg0.get("goal", "min"))
+    constrained = _has_threshold(goal, cfg0)
+    directional = _is_directional(goal, cfg0)
     ucb_beta = float(ap.get("ucb_beta", ap.get("beta", 0.1)) or 0.1)
     pi_tau = float(ap.get("pi_tau", ap.get("tau", 1e-3)) or 1e-3)
     qmc_n = int(ap.get("qmc_samples", 256) or 256)
-    # BoTorch path: only for plain min / max goals (same signed training frame as the GP in mobo_engine)
-    if simple_goal and name in {
-        "qnehvi",
-        "qlogehvi",
-        "qlogei",
-        "qei",
-        "qlehvi",
-        "qehvi",
-        "qucb",
-        "ucb",
-        "qpi",
-        "pi",
-        "parego",
-        "qparego",
-    }:
+    # Threshold goals always use a constrained qLogEI. Plain min/max use BoTorch
+    # unless the caller forced the Sobol grid. Both share the engine's signed Y.
+    if constrained or (directional and name in _BOTORCH_NAMES):
         st = _single_task_model(model)
-        sgn = -1.0 if goal in min_like else 1.0
-        y_s = (np.asarray(Y_np, dtype=float).reshape(-1) * sgn).astype(float)
-        best_f = float(np.max(y_s))
-        torch.manual_seed(int(rng_seed or 0))
-        sampler = _sobol_qmc_sampler(qmc_n, rng_seed, tdtype, tdevice)
-        if name in ("qucb", "ucb"):
-            acqf: Any = qUpperConfidenceBound(st, beta=ucb_beta, sampler=sampler)
+        best_f = _best_signed(np.asarray(Y_np, dtype=float), goal, cfg0)
+        pending = _as_pending(X_pending, tdtype, tdevice)
+        cons = _threshold_constraints([cfg0]) if constrained else None
+        sampler = _sobol_qmc_sampler(qmc_n, seed, tdtype, tdevice)
+        if constrained or name not in ("qucb", "ucb", "qpi", "pi", "qehvi"):
+            acqf: Any = qLogExpectedImprovement(st, best_f=best_f, sampler=sampler, constraints=cons, X_pending=pending)
+        elif name in ("qucb", "ucb"):
+            acqf = qUpperConfidenceBound(st, beta=ucb_beta, sampler=sampler)
         elif name in ("qpi", "pi"):
             acqf = qProbabilityOfImprovement(st, best_f=best_f, sampler=sampler, tau=pi_tau)
-        elif name == "qehvi":
-            acqf = qExpectedImprovement(st, best_f=best_f, sampler=sampler)
         else:
-            # default qnehvi, parego, qlogei, qei, …: log EI (stable)
-            acqf = qLogExpectedImprovement(st, best_f=best_f, sampler=sampler)
+            acqf = qExpectedImprovement(st, best_f=best_f, sampler=sampler)
         d_m = int(bounds_model.shape[1])
         ineq = _linear_inequality_for_botorch(req, params, use_pca_model, d_m, tdevice, tdtype)
-        cand, _ = optimize_acqf(
-            acqf,
-            bounds=bounds_model,
-            q=n,
-            num_restarts=8,
-            raw_samples=256,
-            inequality_constraints=ineq,
-            options={"batch_limit": 5, "maxiter": 200},
-        )
+        controls = _optimizer_controls(req, q=n, n_obj=1, name=name if not constrained else "qlogei")
+        with optimization_lock, torch.random.fork_rng():
+            torch.manual_seed(seed)
+            cand, _ = optimize_acqf(
+                acqf,
+                bounds=bounds_model,
+                q=n,
+                num_restarts=controls["num_restarts"],
+                raw_samples=controls["raw_samples"],
+                inequality_constraints=ineq,
+                options=controls["options"],
+                sequential=controls["sequential"],
+            )
         cand_np = cand.detach().cpu().numpy()
+        observed = train_X.detach().cpu().numpy() if train_X is not None else None
+        if pending is not None:
+            pend_np = pending.detach().cpu().numpy()
+            observed = pend_np if observed is None else np.vstack([observed, pend_np])
         if use_pca_model and pca is not None and pc_mins is not None and pc_range is not None:
-            z_norm = cand_np
-            z_raw = z_norm * np.asarray(pc_range) + np.asarray(pc_mins)
-            x_in = pca.inverse_transform(z_raw)
-            x_in = _enforce_sum_constraints_np(x_in, params, req)
-            x_in = _enforce_ratio_constraints_np(x_in, params, req)
-            x_in = _enforce_sum_constraints_np(x_in, params, req)
+            z_raw = cand_np * np.asarray(pc_range) + np.asarray(pc_mins)
+            x_in = _project_rows(pca.inverse_transform(z_raw), params, req)
             z_norm = (pca.transform(x_in) - np.asarray(pc_mins)) / np.asarray(pc_range)
-            z_norm = np.clip(z_norm, 0.0, 1.0)
+            lo, hi = _bound_arrays(bounds_model)
+            z_norm = np.clip(z_norm, lo, hi)
+            z_norm = _dedup_rows(z_norm, observed, bounds_model, n, seed)
             return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
-        x_in = _enforce_sum_constraints_np(cand_np, params, req)
-        x_in = _enforce_ratio_constraints_np(x_in, params, req)
-        x_in = _enforce_sum_constraints_np(x_in, params, req)
+        x_in = _project_rows(cand_np, params, req)
+        x_in = _dedup_rows(x_in, observed, bounds_model, n, seed)
+        x_in = _project_rows(x_in, params, req)
         return torch.tensor(x_in, dtype=tdtype, device=tdevice)
 
-    sob = SobolEngine(dimension=bounds_input.shape[1], scramble=True, seed=rng_seed or 0)
+    sob = SobolEngine(dimension=bounds_input.shape[1], scramble=True, seed=seed)
     raw_n = 512
     grid01 = sob.draw(raw_n, dtype=tdtype)
     grid = bounds_input[0] + (bounds_input[1] - bounds_input[0]) * grid01
@@ -357,7 +543,8 @@ def select_candidates_single_objective(
         # samples stay inside so we can prefer them in the feasibility mask
         # below; this mirrors bounds_model_pca=[0,1]^k used by the BoTorch
         # path, which keeps its optimiser strictly in-envelope by construction.
-        in_envelope = np.all((z_norm >= 0.0) & (z_norm <= 1.0), axis=1)
+        lo_m, hi_m = _bound_arrays(bounds_model)
+        in_envelope = np.all((z_norm >= lo_m) & (z_norm <= hi_m), axis=1)
         Zgrid = torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         post = model.models[0].posterior(Zgrid)
     else:
@@ -368,9 +555,9 @@ def select_candidates_single_objective(
     mu = _posterior_mean_to_user_units(mu_signed, goal)
 
     # Base score by direction (``mu`` is now in user / original Y units)
-    if goal in ("min", "minimize", "minimize_below", "minimize_above"):
+    if goal in MIN_GOALS:
         score = -mu
-    elif goal in ("max", "maximize", "maximize_below", "maximize_above"):
+    elif goal in MAX_GOALS:
         score = mu
     elif goal in ("within_range",):
         score = np.zeros_like(mu)
@@ -381,11 +568,16 @@ def select_candidates_single_objective(
     elif goal == "improve":
         # Prefer predicted improvement over the best observed value (user units).
         y_col = Y_np[:, 0] if getattr(Y_np, "ndim", 1) > 1 else np.asarray(Y_np, dtype=float).ravel()
-        best = float(np.min(y_col))
-        score = np.maximum(0.0, best - mu)
+        if training_sign(goal) > 0:
+            best = float(np.max(y_col))
+            score = np.maximum(0.0, mu - best)
+        else:
+            best = float(np.min(y_col))
+            score = np.maximum(0.0, best - mu)
     else:
         score = -mu
-    # Threshold / range shaping (demo-compatible, value scale)
+    # Threshold / range shaping. Threshold *goals* are handled on the BoTorch
+    # path above; this block remains for an explicit threshold dict on a soft goal.
     thr = cfg0.get("threshold") or cfg0.get("thresholds")
     rng = cfg0.get("range") or cfg0.get("ranges")
     if isinstance(thr, dict) and (thr.get("value") is not None):
@@ -411,8 +603,8 @@ def select_candidates_single_objective(
             ideal = float(rng.get("ideal"))
             wi = float(rng.get("ideal_weight", rng.get("weight", 0.25)))
             score = score - wi * ((mu - ideal) ** 2)
-    # slight variance regularization
-    score = score - 0.05 * np.sqrt(var)
+    y_col = Y_np[:, 0] if getattr(Y_np, "ndim", 1) > 1 else np.asarray(Y_np, dtype=float).ravel()
+    score = _standardize_score(score, y_col, var, explore=goal != "target")
 
     grid_for_feas = grid.detach().cpu().numpy()
     feas_arr = np.array(_feasible_mask(grid_for_feas.tolist(), req, params), dtype=bool)
@@ -429,7 +621,8 @@ def select_candidates_single_objective(
     # reaches here for non-simple goals, so cfg0 is the relevant objective;
     # still feed it through the generic helper in case more objectives are
     # declared (the helper indexes by req.objectives order).
-    enf_mask = _enforcement_mask_from_posteriors(req, [mu], [var])
+    # ``mu_signed`` is still in the training frame. The helper unsigns once.
+    enf_mask = _enforcement_mask_from_posteriors(req, [mu_signed], [var])
     if enf_mask is not None:
         combined = feas_arr & enf_mask
         if combined.any():
@@ -444,10 +637,8 @@ def select_candidates_single_objective(
     if use_pca_model and pca is not None:
         z_raw = pca.transform(cand_input_np)
         z_norm = (z_raw - pc_mins) / pc_range
-        # Safety net: post-enforcement can drift slightly across the [0,1]
-        # boundary. Clip so the returned candidate is strictly in-envelope
-        # and the GP surface plot shows predictions inside the surface.
-        z_norm = np.clip(z_norm, 0.0, 1.0)
+        lo, hi = _bound_arrays(bounds_model)
+        z_norm = np.clip(z_norm, lo, hi)
         return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
     return torch.tensor(cand_input_np, dtype=tdtype, device=tdevice)
 
@@ -470,76 +661,114 @@ def select_candidates_multiobjective(
     goals: list[str],
     Y_np: np.ndarray,
     train_X: torch.Tensor,
+    X_pending: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Coerce bounds to tensors if lists were passed
     if not hasattr(bounds_input, "shape"):
         bounds_input = torch.tensor(bounds_input, dtype=tdtype, device=tdevice)
     if not hasattr(bounds_model, "shape"):
         bounds_model = torch.tensor(bounds_model, dtype=tdtype, device=tdevice)
-    has_advanced = any(g not in ("min", "max") for g in goals)
-    tY = torch.tensor(
-        Y_np * np.array([1.0 if g == "max" else -1.0 for g in goals], dtype=float), dtype=tdtype, device=tdevice
-    )
-    if not has_advanced:
-        name = _normalize_acquisition_name(req)
+    seed = resolve_seed(rng_seed)
+    name = _normalize_acquisition_name(req)
+    goal_names = [normalize_goal(g) for g in goals]
+    cfgs = _objective_cfgs(req, goal_names)
+    for i, g in enumerate(goal_names):
+        cfgs[i] = {**cfgs[i], "goal": g}
+    constrained = any(_has_threshold(g, cfgs[i]) for i, g in enumerate(goal_names))
+    directional = all(_is_directional(g, cfgs[i]) or _has_threshold(g, cfgs[i]) for i, g in enumerate(goal_names))
+    signs = np.array([training_sign(g) for g in goal_names], dtype=float)
+    y_raw = np.asarray(Y_np, dtype=float)
+    if y_raw.ndim == 1:
+        y_raw = y_raw.reshape(-1, 1)
+    finite_rows = np.isfinite(y_raw).all(axis=1)
+    if not np.any(finite_rows):
+        raise ValueError("no row is finite across every objective")
+    tY = torch.tensor(y_raw[finite_rows] * signs, dtype=tdtype, device=tdevice)
+    baseline_X = train_X[torch.as_tensor(finite_rows, device=train_X.device)]
+    if directional and (constrained or name in _BOTORCH_NAMES):
         ap = _acquisition_params(req)
         qmc_n = int(ap.get("qmc_samples", 256) or 256)
         ucb_beta = float(ap.get("ucb_beta", ap.get("beta", 0.1)) or 0.1)
         pi_tau = float(ap.get("pi_tau", ap.get("tau", 1e-3)) or 1e-3)
-        torch.manual_seed(int(rng_seed or 0))
-        rp = tY.min(dim=0).values - 0.1 * tY.abs().mean(dim=0).clamp_min(1.0)
+        pending = _as_pending(X_pending, tdtype, tdevice)
+        cons = _threshold_constraints(cfgs)
+        rp = _reference_point(tY, req, signs)
         part = NondominatedPartitioning(ref_point=rp.detach().cpu(), Y=tY.detach().cpu())
         d_model = int(bounds_model.shape[1])
         botorch_ineq = _linear_inequality_for_botorch(req, params, use_pca_model, d_model, tdevice, tdtype)
         acqf: Any
-        if name in ("qehvi", "ehvi"):
+        if name in ("qehvi", "ehvi") and not constrained:
             acqf = qExpectedHypervolumeImprovement(model=model, ref_point=rp.tolist(), partitioning=part)
-        elif name in ("qnoisyehvi", "qlognoisyehvi"):
-            acqf = qLogNoisyExpectedHypervolumeImprovement(model=model, ref_point=rp.tolist(), X_baseline=train_X)
+        elif name in ("qnoisyehvi", "qlognoisyehvi") or constrained:
+            acqf = (
+                qLogNoisyExpectedHypervolumeImprovement(
+                    model=model,
+                    ref_point=rp.tolist(),
+                    X_baseline=baseline_X,
+                    prune_baseline=True,
+                    constraints=cons,
+                    X_pending=pending,
+                )
+                if name in ("qnoisyehvi", "qlognoisyehvi")
+                else qLogExpectedHypervolumeImprovement(
+                    model=model,
+                    ref_point=rp.tolist(),
+                    partitioning=part,
+                    constraints=cons,
+                    X_pending=pending,
+                )
+            )
         elif name in ("qnehvi", "qlogehvi", "qlehvi", "logehvi"):
-            acqf = qLogExpectedHypervolumeImprovement(model=model, ref_point=rp.tolist(), partitioning=part)
+            acqf = qLogExpectedHypervolumeImprovement(
+                model=model, ref_point=rp.tolist(), partitioning=part, constraints=cons, X_pending=pending
+            )
         elif name in ("parego", "qparego", "qei"):
-            sampler = _sobol_qmc_sampler(qmc_n, rng_seed, tdtype, tdevice)
-            mo_obj, best_f = _parego_scalarized_objective(tY, rng_seed, tdevice, tdtype)
-            acqf = qLogExpectedImprovement(model, best_f=best_f, sampler=sampler, objective=mo_obj)
+            sampler = _sobol_qmc_sampler(qmc_n, seed, tdtype, tdevice)
+            mo_obj, best_f = _parego_scalarized_objective(tY, seed, tdevice, tdtype)
+            acqf = qLogExpectedImprovement(
+                model, best_f=best_f, sampler=sampler, objective=mo_obj, constraints=cons, X_pending=pending
+            )
         elif name in ("qpi", "pi"):
-            sampler = _sobol_qmc_sampler(qmc_n, rng_seed, tdtype, tdevice)
-            mo_obj, best_f = _parego_scalarized_objective(tY, rng_seed, tdevice, tdtype)
+            sampler = _sobol_qmc_sampler(qmc_n, seed, tdtype, tdevice)
+            mo_obj, best_f = _parego_scalarized_objective(tY, seed, tdevice, tdtype)
             acqf = qProbabilityOfImprovement(model, best_f=best_f, sampler=sampler, objective=mo_obj, tau=pi_tau)
         elif name in ("qucb", "ucb"):
-            sampler = _sobol_qmc_sampler(qmc_n, rng_seed, tdtype, tdevice)
-            mo_obj, _ = _parego_scalarized_objective(tY, rng_seed, tdevice, tdtype)
+            sampler = _sobol_qmc_sampler(qmc_n, seed, tdtype, tdevice)
+            mo_obj, _ = _parego_scalarized_objective(tY, seed, tdevice, tdtype)
             acqf = qUpperConfidenceBound(model, beta=ucb_beta, sampler=sampler, objective=mo_obj)
         else:
-            _log.debug("Unknown multi-objective acquisition name %r; using qLogExpectedHypervolumeImprovement", name)
-            acqf = qLogExpectedHypervolumeImprovement(model=model, ref_point=rp.tolist(), partitioning=part)
-        cand, _ = optimize_acqf(
-            acqf,
-            bounds=bounds_model,
-            q=n,
-            num_restarts=8,
-            raw_samples=256,
-            inequality_constraints=botorch_ineq,
-            options={"batch_limit": 5, "maxiter": 200},
-        )
+            acqf = qLogExpectedHypervolumeImprovement(
+                model=model, ref_point=rp.tolist(), partitioning=part, constraints=cons, X_pending=pending
+            )
+        controls = _optimizer_controls(req, q=n, n_obj=len(goal_names), name=name)
+        with optimization_lock, torch.random.fork_rng():
+            torch.manual_seed(seed)
+            cand, _ = optimize_acqf(
+                acqf,
+                bounds=bounds_model,
+                q=n,
+                num_restarts=controls["num_restarts"],
+                raw_samples=controls["raw_samples"],
+                inequality_constraints=botorch_ineq,
+                options=controls["options"],
+                sequential=controls["sequential"],
+            )
         cand_np = cand.detach().cpu().numpy()
+        observed = train_X.detach().cpu().numpy()
+        if pending is not None:
+            observed = np.vstack([observed, pending.detach().cpu().numpy()])
+        lo, hi = _bound_arrays(bounds_model)
         if use_pca_model and pca is not None:
-            z_norm = cand_np
-            z_raw = z_norm * pc_range + pc_mins
-            x_in = pca.inverse_transform(z_raw)
-            x_in = _enforce_sum_constraints_np(x_in, params, req)
-            x_in = _enforce_ratio_constraints_np(x_in, params, req)
-            x_in = _enforce_sum_constraints_np(x_in, params, req)
-            z_norm = (pca.transform(x_in) - pc_mins) / pc_range
-            z_norm = np.clip(z_norm, 0.0, 1.0)
+            z_raw = cand_np * np.asarray(pc_range) + np.asarray(pc_mins)
+            x_in = _project_rows(pca.inverse_transform(z_raw), params, req)
+            z_norm = np.clip((pca.transform(x_in) - np.asarray(pc_mins)) / np.asarray(pc_range), lo, hi)
+            z_norm = _dedup_rows(z_norm, observed, bounds_model, n, seed)
             return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
-        x_in = _enforce_sum_constraints_np(cand_np, params, req)
-        x_in = _enforce_ratio_constraints_np(x_in, params, req)
-        x_in = _enforce_sum_constraints_np(x_in, params, req)
-        return torch.tensor(x_in, dtype=tdtype, device=tdevice)
+        x_in = _dedup_rows(_project_rows(cand_np, params, req), observed, bounds_model, n, seed)
+        return torch.tensor(_project_rows(x_in, params, req), dtype=tdtype, device=tdevice)
 
     # Advanced: sampling + scoring
-    sob = SobolEngine(dimension=bounds_input.shape[1], scramble=True, seed=rng_seed or 0)
+    sob = SobolEngine(dimension=bounds_input.shape[1], scramble=True, seed=seed)
     raw_n = 1024
     grid01 = sob.draw(raw_n, dtype=tdtype)
     grid = bounds_input[0] + (bounds_input[1] - bounds_input[0]) * grid01
@@ -554,7 +783,8 @@ def select_candidates_multiobjective(
         # See single-objective counterpart: GP is trained on z_norm in
         # [0,1]^k; track which Sobol samples stay in-envelope so the
         # feasibility mask can prefer them over PC extrapolations.
-        in_envelope = np.all((z_norm >= 0.0) & (z_norm <= 1.0), axis=1)
+        lo_m, hi_m = _bound_arrays(bounds_model)
+        in_envelope = np.all((z_norm >= lo_m) & (z_norm <= hi_m), axis=1)
         Zgrid = torch.tensor(z_norm, dtype=tdtype, device=tdevice)
         posts = [m.posterior(Zgrid) for m in model.models]
     else:
@@ -569,9 +799,9 @@ def select_candidates_multiobjective(
         mu = _posterior_mean_to_user_units(mu_list[k], goal)
         var = var_list[k]
         # base direction
-        if goal in ("min", "minimize", "minimize_below", "minimize_above"):
+        if goal in MIN_GOALS:
             score_k = -mu
-        elif goal in ("max", "maximize", "maximize_below", "maximize_above"):
+        elif goal in MAX_GOALS:
             score_k = mu
         elif goal == "within_range":
             score_k = np.zeros_like(mu)
@@ -582,8 +812,8 @@ def select_candidates_multiobjective(
         elif goal == "improve":
             y_col = Y_np[:, k] if Y_np.ndim > 1 else np.asarray(Y_np, dtype=float).ravel()
             # Direction from the declared goal list when present; default minimize.
-            gk = str(goals[k] if k < len(goals) else "min").lower()
-            if gk == "max":
+            gk = normalize_goal(goals[k] if k < len(goals) else "min")
+            if gk in MAX_GOALS:
                 best = float(np.max(y_col))
                 score_k = np.maximum(0.0, mu - best)
             else:
@@ -617,7 +847,8 @@ def select_candidates_multiobjective(
                 ideal = float(rng.get("ideal"))
                 wi = float(rng.get("ideal_weight", rng.get("weight", 0.25)))
                 score_k = score_k - wi * ((mu - ideal) ** 2)
-        score_k = score_k - 0.05 * np.sqrt(var)
+        y_col = Y_np[:, k] if getattr(Y_np, "ndim", 1) > 1 else np.asarray(Y_np, dtype=float).ravel()
+        score_k = _standardize_score(score_k, y_col, var, explore=goal != "target")
         score += score_k
     grid_for_feas = grid.detach().cpu().numpy()
     feas_arr = np.array(_feasible_mask(grid_for_feas.tolist(), req, params), dtype=bool)
@@ -642,6 +873,7 @@ def select_candidates_multiobjective(
     if use_pca_model and pca is not None:
         z_raw = pca.transform(cand_np)
         z_norm = (z_raw - pc_mins) / pc_range
-        z_norm = np.clip(z_norm, 0.0, 1.0)
+        lo, hi = _bound_arrays(bounds_model)
+        z_norm = np.clip(z_norm, lo, hi)
         return torch.tensor(z_norm, dtype=tdtype, device=tdevice)
     return torch.tensor(cand_np, dtype=tdtype, device=tdevice)

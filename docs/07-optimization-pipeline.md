@@ -130,19 +130,22 @@ Sobol grid + posterior-scoring strategy.
 
 ### 7.5.3 Advanced-goal path
 
-If **any** objective uses an advanced goal (`target`, `within_range`,
-threshold types, `explore`, `improve`), the engine ignores `acquisition` and
-uses Sobol sampling plus goal-shaped posterior scoring. The score penalizes
-distance to target, threshold violations, range-membership failure, or
-rewards high variance, depending on the goal.
+`min` / `minimize` / `max` / `maximize`, and the four threshold goals when a
+threshold is set, use BoTorch. Threshold goals add an outcome constraint
+(`f ≤ T` or `f ≥ T`) on qLogEI or qLogEHVI. `target`, `within_range`,
+`explore` / `probe`, and `improve` use Sobol sampling plus goal-shaped
+posterior scoring. Those scores are divided by the standard deviation of the
+training `Y`, and uncertainty enters as a UCB bonus.
 
 ### 7.5.4 Constraint handling during acquisition
 
 - **Input space** — linear inequalities (sum / ratio) are passed as
   `inequality_constraints` to `optimize_acqf`.
-- **PCA space** — indices do not align with the model dimension, so
-  constraints are enforced post-selection via `feasible_mask` and
-  `enforce_sum_constraints_np` (§7.6).
+- **PCA space** — the latent optimiser does not see the original indices.
+  Each candidate is inverse-transformed and then projected onto the feasible
+  polytope (bounds, every sum group, and ratio rows). `feasible_mask` is only
+  used by the Sobol scoring path. A point that cannot be made feasible is
+  returned with `candidate_feasible: false`.
 
 ## 7.6 Step 5 — Feasibility & constraint enforcement
 

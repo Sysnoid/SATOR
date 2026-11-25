@@ -15,41 +15,39 @@ from sator_os_engine.core.models.optimize import OptimizationConfig, OptimizeReq
 from sator_os_engine.core.optimizer.mobo_engine import run_optimization
 
 
-def test_invalid_param_type_raises_runtimeerror():
+def test_invalid_param_type_raises():
     X = np.random.RandomState(0).uniform(low=0.0, high=1.0, size=(20, 2))
     Y = (np.sum(X, axis=1))[:, None]
-    req = OptimizeRequest(
-        dataset={"X": X.tolist(), "Y": Y.tolist()},
-        search_space={
-            "parameters": [
-                {"name": "a", "type": "float", "min": 0.0, "max": 1.0},
-                {"name": "b", "type": "categorical", "choices": ["x", "y", "z"]},  # unsupported for v0.1 GP
-            ]
-        },
-        objectives={"o": {"goal": "min"}},
-        optimization_config=OptimizationConfig(acquisition="qei", batch_size=2, max_evaluations=5, seed=1),
-    )
-    with pytest.raises(RuntimeError):
-        run_optimization(req, device="cpu")
+    with pytest.raises(ValueError, match="unsupported type"):
+        OptimizeRequest(
+            dataset={"X": X.tolist(), "Y": Y.tolist()},
+            search_space={
+                "parameters": [
+                    {"name": "a", "type": "float", "min": 0.0, "max": 1.0},
+                    {"name": "b", "type": "foo", "choices": ["x", "y", "z"]},
+                ]
+            },
+            objectives={"o": {"goal": "min"}},
+            optimization_config=OptimizationConfig(acquisition="qei", batch_size=2, max_evaluations=5, seed=1),
+        )
 
 
-def test_objectives_mismatch_tolerated():
-    # Y has 1 column but two objectives are declared; current engine tolerates this
+def test_objectives_mismatch_rejected():
+    # Y has 1 column but two objectives are declared.
     X = np.random.RandomState(1).uniform(low=0.0, high=1.0, size=(25, 2))
     Y = (np.sum(X, axis=1))[:, None]  # shape (n, 1)
-    req = OptimizeRequest(
-        dataset={"X": X.tolist(), "Y": Y.tolist()},
-        search_space={
-            "parameters": [
-                {"name": "x1", "type": "float", "min": 0.0, "max": 1.0},
-                {"name": "x2", "type": "float", "min": 0.0, "max": 1.0},
-            ]
-        },
-        objectives={"o1": {"goal": "min"}, "o2": {"goal": "max"}},
-        optimization_config=OptimizationConfig(acquisition="qnehvi", batch_size=2, max_evaluations=5, seed=2),
-    )
-    res = run_optimization(req, device="cpu")
-    assert isinstance(res.get("predictions"), list) and len(res["predictions"]) == 2
+    with pytest.raises(ValueError, match="column"):
+        OptimizeRequest(
+            dataset={"X": X.tolist(), "Y": Y.tolist()},
+            search_space={
+                "parameters": [
+                    {"name": "x1", "type": "float", "min": 0.0, "max": 1.0},
+                    {"name": "x2", "type": "float", "min": 0.0, "max": 1.0},
+                ]
+            },
+            objectives={"o1": {"goal": "min"}, "o2": {"goal": "max"}},
+            optimization_config=OptimizationConfig(acquisition="qnehvi", batch_size=2, max_evaluations=5, seed=2),
+        )
 
 
 def test_request_pca_maps_without_pca_raises():
